@@ -288,6 +288,11 @@ struct MainView: View {
     // MARK: - Helpers
 
     private var filteredProfiles: [ConnectionProfile] {
+        // Subscribe to ProfileStore mutations via @Observable so SwiftUI re-renders when
+        // refreshTrigger changes (add/delete/toggle). Without this, @Query alone does not
+        // reliably trigger view invalidation inside NavigationSplitView on macOS.
+        _ = profileStore?.refreshTrigger
+
         // 1. Start with the live-updating SwiftData array
         var result = allProfiles
 
