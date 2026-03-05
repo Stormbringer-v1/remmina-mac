@@ -12,10 +12,6 @@ struct MainView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ConnectionManager.self) private var connectionManager
 
-    /// SwiftData @Query automatically triggers view re-renders when profiles
-    /// are inserted, deleted, or modified — fixing the stale sidebar issue.
-    @Query(sort: \ConnectionProfile.name) private var allProfiles: [ConnectionProfile]
-
     @State private var selectedProfile: ConnectionProfile?
     @State private var searchText = ""
     @State private var showingNewProfile = false
@@ -29,6 +25,10 @@ struct MainView: View {
     @State private var profileToDelete: ConnectionProfile?
     @State private var validationError: String?
     @State private var showingValidationError = false
+
+    /// Explicit profile cache — mutated after every add/delete/edit/import
+    /// so SwiftUI's @State change tracking triggers an immediate re-render.
+    @State private var profiles: [ConnectionProfile] = []
 
     enum FilterMode: String, CaseIterable {
         case all = "All"
@@ -51,6 +51,7 @@ struct MainView: View {
         .searchable(text: $searchText, prompt: "Search profiles (⌘F)")
         .onAppear {
             profileStore = ProfileStore(modelContext: modelContext)
+            reloadProfiles()
             // Auto-connect profiles marked "Connect on open"
             autoConnectOnOpen()
         }
@@ -77,6 +78,9 @@ struct MainView: View {
                             showingValidationError = true
                         }
                     }
+                    // Immediately refresh the sidebar list
+                    reloadProfiles()
+                    selectedProfile = profile
                 } catch {
                     validationError = error.localizedDescription
                     showingValidationError = true
@@ -98,6 +102,7 @@ struct MainView: View {
                     }
                     // password == nil means user didn't touch the password field
                     profileStore?.save()
+                    reloadProfiles()
                 }
             }
         }
@@ -258,6 +263,7 @@ struct MainView: View {
 
         Button(profile.isFavorite ? "Unfavorite" : "Favorite") {
             profileStore?.toggleFavorite(profile)
+            reloadProfiles()
         }
 
         Button("Copy Host") {
@@ -286,18 +292,22 @@ struct MainView: View {
 
     // MARK: - Helpers
 
+    /// Reloads the profile list from SwiftData into the @State array.
+    /// This is the single source of truth for the sidebar — call after every mutation.
+    private func reloadProfiles() {
+        profiles = profileStore?.allProfiles() ?? []
+    }
+
     private var filteredProfiles: [ConnectionProfile] {
-        // Filter the @Query results directly — @Query handles SwiftData reactivity,
-        // so the sidebar updates immediately when profiles are added/deleted.
         let base: [ConnectionProfile]
 
         switch filterMode {
         case .all:
-            base = allProfiles
+            base = profiles
         case .favorites:
-            base = allProfiles.filter { $0.isFavorite }
+            base = profiles.filter { $0.isFavorite }
         case .recent:
-            base = allProfiles
+            base = profiles
                 .filter { $0.lastConnectedAt != nil }
                 .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
         }
@@ -317,6 +327,7 @@ struct MainView: View {
 
     private func connectToProfile(_ profile: ConnectionProfile) {
         profileStore?.markConnected(profile)
+        reloadProfiles()
         connectionManager.openSession(for: profile)
     }
 
@@ -333,11 +344,12 @@ struct MainView: View {
             selectedProfile = nil
         }
         profileStore?.delete(profile)
+        reloadProfiles()
     }
 
     /// Auto-connect profiles marked "Connect on open" at app launch
     private func autoConnectOnOpen() {
-        let autoConnectProfiles = allProfiles.filter { $0.connectOnOpen }
+        let autoConnectProfiles = profiles.filter { $0.connectOnOpen }
         for profile in autoConnectProfiles {
             profileStore?.markConnected(profile)
             connectionManager.openSession(for: profile)
@@ -348,15 +360,15 @@ struct MainView: View {
     }
 
     private func exportProfiles() {
-        guard !allProfiles.isEmpty else { return }
+        guard !profiles.isEmpty else { return }
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
         panel.nameFieldStringValue = "remmina_profiles.json"
 
         if panel.runModal() == .OK, let url = panel.url {
-            if ProfileImportExport.exportToFile(allProfiles, url: url) {
-                AppLogger.shared.log("Exported \(allProfiles.count) profiles to \(url.lastPathComponent)")
+            if ProfileImportExport.exportToFile(profiles, url: url) {
+                AppLogger.shared.log("Exported \(profiles.count) profiles to \(url.lastPathComponent)")
             }
         }
     }
@@ -368,11 +380,11 @@ struct MainView: View {
 
         if panel.runModal() == .OK, let url = panel.url {
             do {
-                let profiles = try ProfileImportExport.importFromFile(url)
+                let imported = try ProfileImportExport.importFromFile(url)
                 var successCount = 0
                 var failedProfiles: [(String, String)] = []
                 
-                for profile in profiles {
+                for profile in imported {
                     do {
                         try profileStore?.add(profile)
                         successCount += 1
@@ -380,6 +392,9 @@ struct MainView: View {
                         failedProfiles.append((profile.name, error.localizedDescription))
                     }
                 }
+                
+                // Refresh sidebar after all imports
+                reloadProfiles()
                 
                 if successCount > 0 {
                     importCount = successCount
