@@ -12,6 +12,9 @@ struct MainView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ConnectionManager.self) private var connectionManager
 
+    // Live-updating source of truth — @Query reacts to modelContext changes automatically
+    @Query(sort: \ConnectionProfile.name, order: .forward) private var allProfiles: [ConnectionProfile]
+
     @State private var selectedProfile: ConnectionProfile?
     @State private var searchText = ""
     @State private var showingNewProfile = false
@@ -25,10 +28,6 @@ struct MainView: View {
     @State private var profileToDelete: ConnectionProfile?
     @State private var validationError: String?
     @State private var showingValidationError = false
-
-    /// Explicit profile cache — mutated after every add/delete/edit/import
-    /// so SwiftUI's @State change tracking triggers an immediate re-render.
-    @State private var profiles: [ConnectionProfile] = []
 
     enum FilterMode: String, CaseIterable {
         case all = "All"
@@ -51,7 +50,6 @@ struct MainView: View {
         .searchable(text: $searchText, prompt: "Search profiles (⌘F)")
         .onAppear {
             profileStore = ProfileStore(modelContext: modelContext)
-            reloadProfiles()
             // Auto-connect profiles marked "Connect on open"
             autoConnectOnOpen()
         }
@@ -78,8 +76,7 @@ struct MainView: View {
                             showingValidationError = true
                         }
                     }
-                    // Immediately refresh the sidebar list
-                    reloadProfiles()
+                    // Auto-select the newly created profile
                     selectedProfile = profile
                 } catch {
                     validationError = error.localizedDescription
@@ -102,7 +99,6 @@ struct MainView: View {
                     }
                     // password == nil means user didn't touch the password field
                     profileStore?.save()
-                    reloadProfiles()
                 }
             }
         }
@@ -263,7 +259,6 @@ struct MainView: View {
 
         Button(profile.isFavorite ? "Unfavorite" : "Favorite") {
             profileStore?.toggleFavorite(profile)
-            reloadProfiles()
         }
 
         Button("Copy Host") {
@@ -292,42 +287,35 @@ struct MainView: View {
 
     // MARK: - Helpers
 
-    /// Reloads the profile list from SwiftData into the @State array.
-    /// This is the single source of truth for the sidebar — call after every mutation.
-    private func reloadProfiles() {
-        profiles = profileStore?.allProfiles() ?? []
-    }
-
     private var filteredProfiles: [ConnectionProfile] {
-        let base: [ConnectionProfile]
+        // 1. Start with the live-updating SwiftData array
+        var result = allProfiles
 
+        // 2. Apply search text in-memory (much faster than querying SQLite)
+        if !searchText.isEmpty {
+            result = result.filter { profile in
+                profile.name.localizedStandardContains(searchText) ||
+                profile.host.localizedStandardContains(searchText) ||
+                profile.username.localizedStandardContains(searchText) ||
+                profile.tagsRawValue.localizedStandardContains(searchText)
+            }
+        }
+
+        // 3. Apply the sidebar tab filter
         switch filterMode {
         case .all:
-            base = profiles
+            return result
         case .favorites:
-            base = profiles.filter { $0.isFavorite }
+            return result.filter { $0.isFavorite }
         case .recent:
-            base = profiles
+            return result
                 .filter { $0.lastConnectedAt != nil }
                 .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
-        }
-
-        if searchText.isEmpty {
-            return base
-        }
-
-        let query = searchText.lowercased()
-        return base.filter {
-            $0.name.localizedCaseInsensitiveContains(query) ||
-            $0.host.localizedCaseInsensitiveContains(query) ||
-            $0.username.localizedCaseInsensitiveContains(query) ||
-            $0.tagsRawValue.localizedCaseInsensitiveContains(query)
         }
     }
 
     private func connectToProfile(_ profile: ConnectionProfile) {
         profileStore?.markConnected(profile)
-        reloadProfiles()
         connectionManager.openSession(for: profile)
     }
 
@@ -344,12 +332,11 @@ struct MainView: View {
             selectedProfile = nil
         }
         profileStore?.delete(profile)
-        reloadProfiles()
     }
 
     /// Auto-connect profiles marked "Connect on open" at app launch
     private func autoConnectOnOpen() {
-        let autoConnectProfiles = profiles.filter { $0.connectOnOpen }
+        let autoConnectProfiles = allProfiles.filter { $0.connectOnOpen }
         for profile in autoConnectProfiles {
             profileStore?.markConnected(profile)
             connectionManager.openSession(for: profile)
@@ -360,15 +347,15 @@ struct MainView: View {
     }
 
     private func exportProfiles() {
-        guard !profiles.isEmpty else { return }
+        guard !allProfiles.isEmpty else { return }
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
         panel.nameFieldStringValue = "remmina_profiles.json"
 
         if panel.runModal() == .OK, let url = panel.url {
-            if ProfileImportExport.exportToFile(profiles, url: url) {
-                AppLogger.shared.log("Exported \(profiles.count) profiles to \(url.lastPathComponent)")
+            if ProfileImportExport.exportToFile(allProfiles, url: url) {
+                AppLogger.shared.log("Exported \(allProfiles.count) profiles to \(url.lastPathComponent)")
             }
         }
     }
@@ -392,9 +379,6 @@ struct MainView: View {
                         failedProfiles.append((profile.name, error.localizedDescription))
                     }
                 }
-                
-                // Refresh sidebar after all imports
-                reloadProfiles()
                 
                 if successCount > 0 {
                     importCount = successCount
