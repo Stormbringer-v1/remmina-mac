@@ -6,6 +6,11 @@ import SwiftData
 final class ProfileStore {
     private let modelContext: ModelContext
 
+    /// Increment on every mutation so SwiftUI re-evaluates views that read from this store.
+    /// Without this, computed properties like `filteredProfiles` in MainView won't refresh
+    /// because SwiftData changes alone don't trigger @Observable notifications.
+    private(set) var refreshTrigger = 0
+
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
     }
@@ -18,6 +23,7 @@ final class ProfileStore {
         
         modelContext.insert(profile)
         save()
+        refreshTrigger += 1
         AppLogger.shared.log("Profile added: \(profile.name)", profileId: profile.id)
     }
 
@@ -25,6 +31,7 @@ final class ProfileStore {
         AppLogger.shared.log("Profile deleted: \(profile.name)", profileId: profile.id)
         modelContext.delete(profile)
         save()
+        refreshTrigger += 1
     }
 
     func save() {
@@ -90,10 +97,12 @@ final class ProfileStore {
     func toggleFavorite(_ profile: ConnectionProfile) {
         profile.isFavorite.toggle()
         save()
+        refreshTrigger += 1
     }
 
     func markConnected(_ profile: ConnectionProfile) {
         profile.lastConnectedAt = Date()
         save()
+        refreshTrigger += 1
     }
 }

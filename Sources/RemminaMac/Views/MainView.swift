@@ -285,6 +285,10 @@ struct MainView: View {
     private var filteredProfiles: [ConnectionProfile] {
         guard let store = profileStore else { return [] }
 
+        // Access refreshTrigger so SwiftUI's @Observable tracking registers
+        // a dependency — this ensures the list re-renders after add/delete/edit.
+        let _ = store.refreshTrigger
+
         switch filterMode {
         case .all:
             return store.search(query: searchText)
