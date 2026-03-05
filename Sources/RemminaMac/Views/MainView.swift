@@ -12,6 +12,10 @@ struct MainView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ConnectionManager.self) private var connectionManager
 
+    /// SwiftData @Query automatically triggers view re-renders when profiles
+    /// are inserted, deleted, or modified — fixing the stale sidebar issue.
+    @Query(sort: \ConnectionProfile.name) private var allProfiles: [ConnectionProfile]
+
     @State private var selectedProfile: ConnectionProfile?
     @State private var searchText = ""
     @State private var showingNewProfile = false
@@ -283,25 +287,31 @@ struct MainView: View {
     // MARK: - Helpers
 
     private var filteredProfiles: [ConnectionProfile] {
-        guard let store = profileStore else { return [] }
-
-        // Access refreshTrigger so SwiftUI's @Observable tracking registers
-        // a dependency — this ensures the list re-renders after add/delete/edit.
-        let _ = store.refreshTrigger
+        // Filter the @Query results directly — @Query handles SwiftData reactivity,
+        // so the sidebar updates immediately when profiles are added/deleted.
+        let base: [ConnectionProfile]
 
         switch filterMode {
         case .all:
-            return store.search(query: searchText)
+            base = allProfiles
         case .favorites:
-            if searchText.isEmpty {
-                return store.favorites()
-            }
-            return store.search(query: searchText).filter { $0.isFavorite }
+            base = allProfiles.filter { $0.isFavorite }
         case .recent:
-            if searchText.isEmpty {
-                return store.recents()
-            }
-            return store.search(query: searchText).filter { $0.lastConnectedAt != nil }
+            base = allProfiles
+                .filter { $0.lastConnectedAt != nil }
+                .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
+        }
+
+        if searchText.isEmpty {
+            return base
+        }
+
+        let query = searchText.lowercased()
+        return base.filter {
+            $0.name.localizedCaseInsensitiveContains(query) ||
+            $0.host.localizedCaseInsensitiveContains(query) ||
+            $0.username.localizedCaseInsensitiveContains(query) ||
+            $0.tagsRawValue.localizedCaseInsensitiveContains(query)
         }
     }
 
@@ -327,10 +337,9 @@ struct MainView: View {
 
     /// Auto-connect profiles marked "Connect on open" at app launch
     private func autoConnectOnOpen() {
-        guard let store = profileStore else { return }
-        let autoConnectProfiles = store.allProfiles().filter { $0.connectOnOpen }
+        let autoConnectProfiles = allProfiles.filter { $0.connectOnOpen }
         for profile in autoConnectProfiles {
-            store.markConnected(profile)
+            profileStore?.markConnected(profile)
             connectionManager.openSession(for: profile)
         }
         if !autoConnectProfiles.isEmpty {
@@ -339,16 +348,15 @@ struct MainView: View {
     }
 
     private func exportProfiles() {
-        let profiles = profileStore?.allProfiles() ?? []
-        guard !profiles.isEmpty else { return }
+        guard !allProfiles.isEmpty else { return }
 
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
         panel.nameFieldStringValue = "remmina_profiles.json"
 
         if panel.runModal() == .OK, let url = panel.url {
-            if ProfileImportExport.exportToFile(profiles, url: url) {
-                AppLogger.shared.log("Exported \(profiles.count) profiles to \(url.lastPathComponent)")
+            if ProfileImportExport.exportToFile(allProfiles, url: url) {
+                AppLogger.shared.log("Exported \(allProfiles.count) profiles to \(url.lastPathComponent)")
             }
         }
     }
