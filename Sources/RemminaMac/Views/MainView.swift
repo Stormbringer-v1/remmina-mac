@@ -12,8 +12,10 @@ struct MainView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ConnectionManager.self) private var connectionManager
 
-    // Live-updating source of truth — @Query reacts to modelContext changes automatically
-    @Query(sort: \ConnectionProfile.name, order: .forward) private var allProfiles: [ConnectionProfile]
+    // Explicit @State array — refreshed via refreshProfiles() after every mutation.
+    // @Query is not used because it does not reliably trigger view invalidation
+    // inside NavigationSplitView on macOS after modelContext.insert().
+    @State private var allProfiles: [ConnectionProfile] = []
 
     @State private var selectedProfile: ConnectionProfile?
     @State private var searchText = ""
@@ -50,6 +52,7 @@ struct MainView: View {
         .searchable(text: $searchText, prompt: "Search profiles (⌘F)")
         .onAppear {
             profileStore = ProfileStore(modelContext: modelContext)
+            refreshProfiles()
             // Auto-connect profiles marked "Connect on open"
             autoConnectOnOpen()
         }
@@ -70,6 +73,7 @@ struct MainView: View {
             ProfileEditView(mode: .create) { profile, password in
                 do {
                     try profileStore?.add(profile)
+                    refreshProfiles()
                     if let password = password, !password.isEmpty {
                         if !KeychainStore.shared.savePassword(password, for: profile.id) {
                             validationError = "Unable to save password to Keychain. Check System Settings → Privacy & Security."
@@ -99,6 +103,7 @@ struct MainView: View {
                     }
                     // password == nil means user didn't touch the password field
                     profileStore?.save()
+                    refreshProfiles()
                 }
             }
         }
@@ -259,6 +264,7 @@ struct MainView: View {
 
         Button(profile.isFavorite ? "Unfavorite" : "Favorite") {
             profileStore?.toggleFavorite(profile)
+            refreshProfiles()
         }
 
         Button("Copy Host") {
@@ -287,13 +293,16 @@ struct MainView: View {
 
     // MARK: - Helpers
 
-    private var filteredProfiles: [ConnectionProfile] {
-        // Subscribe to ProfileStore mutations via @Observable so SwiftUI re-renders when
-        // refreshTrigger changes (add/delete/toggle). Without this, @Query alone does not
-        // reliably trigger view invalidation inside NavigationSplitView on macOS.
-        _ = profileStore?.refreshTrigger
+    /// Re-fetch all profiles from the model context into the @State array.
+    /// Called after every mutation to guarantee the sidebar reflects the latest data.
+    private func refreshProfiles() {
+        let descriptor = FetchDescriptor<ConnectionProfile>(
+            sortBy: [SortDescriptor(\.name, order: .forward)]
+        )
+        allProfiles = (try? modelContext.fetch(descriptor)) ?? []
+    }
 
-        // 1. Start with the live-updating SwiftData array
+    private var filteredProfiles: [ConnectionProfile] {
         var result = allProfiles
 
         // 2. Apply search text in-memory (much faster than querying SQLite)
@@ -321,6 +330,7 @@ struct MainView: View {
 
     private func connectToProfile(_ profile: ConnectionProfile) {
         profileStore?.markConnected(profile)
+        refreshProfiles()
         connectionManager.openSession(for: profile)
     }
 
@@ -337,6 +347,7 @@ struct MainView: View {
             selectedProfile = nil
         }
         profileStore?.delete(profile)
+        refreshProfiles()
     }
 
     /// Auto-connect profiles marked "Connect on open" at app launch
@@ -386,6 +397,7 @@ struct MainView: View {
                 }
                 
                 if successCount > 0 {
+                    refreshProfiles()
                     importCount = successCount
                     importAlert = true
                 }
