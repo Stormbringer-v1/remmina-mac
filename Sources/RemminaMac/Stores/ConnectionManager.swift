@@ -38,6 +38,14 @@ final class ConnectionManager: SessionDelegate {
     /// or if the maximum session limit has been reached.
     @discardableResult
     func openSession(for profile: ConnectionProfile) -> Bool {
+        // Re-validate host at connect time. Mutated/imported profiles might have bypassed UI validation.
+        do {
+            _ = try ProfileValidator.validateHost(profile.host)
+        } catch {
+            AppLogger.shared.log("Connection aborted: Host validation failed for \(profile.name) — \(error.localizedDescription)", level: .error)
+            return false
+        }
+
         // Prevent duplicate sessions to the same profile
         if let existing = sessions.first(where: { $0.profileId == profile.id && $0.status.isActive }) {
             activeSessionId = existing.id

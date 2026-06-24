@@ -61,9 +61,9 @@ enum ProfileValidator {
     }
     
     /// Validate hostname
-    static func validateHost(_ host: String, blockPrivateRanges: Bool = false) throws -> String {
+    static func validateHost(_ host: String, blockPrivateRanges: Bool = false, blockLocalhost: Bool = false) throws -> String {
         do {
-            return try HostnameValidator.validate(host, blockPrivateRanges: blockPrivateRanges)
+            return try HostnameValidator.validate(host, blockPrivateRanges: blockPrivateRanges, blockLocalhost: blockLocalhost)
         } catch let error as HostnameValidator.ValidationError {
             throw ValidationError.hostInvalid(error.localizedDescription)
         }
@@ -129,9 +129,9 @@ enum ProfileValidator {
     }
     
     /// Validate entire profile
-    static func validate(_ profile: ConnectionProfile, blockPrivateRanges: Bool = false) throws {
+    static func validate(_ profile: ConnectionProfile, blockPrivateRanges: Bool = false, blockLocalhost: Bool = false) throws {
         _ = try validateName(profile.name)
-        _ = try validateHost(profile.host, blockPrivateRanges: blockPrivateRanges)
+        _ = try validateHost(profile.host, blockPrivateRanges: blockPrivateRanges, blockLocalhost: blockLocalhost)
         _ = try validatePort(profile.port)
         _ = try validateUsername(profile.username)
         _ = try validateDomain(profile.domain)

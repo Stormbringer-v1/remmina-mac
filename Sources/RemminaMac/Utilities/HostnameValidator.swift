@@ -44,13 +44,7 @@ enum HostnameValidator {
     /// Characters that could enable command injection when hostnames are passed to shell commands
     private static let shellMetacharacters = CharacterSet(charactersIn: ";|&`$(){}!<>\\'\"\n\r\0")
     
-    /// Validate hostname for security risks
-    /// - Parameters:
-    ///   - hostname: The hostname to validate
-    ///   - blockPrivateRanges: If true, also block RFC1918 private addresses
-    /// - Returns: Validated hostname
-    /// - Throws: ValidationError if hostname is unsafe
-    static func validate(_ hostname: String, blockPrivateRanges: Bool = false) throws -> String {
+    static func validate(_ hostname: String, blockPrivateRanges: Bool = false, blockLocalhost: Bool = false) throws -> String {
         let trimmed = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
         
         guard !trimmed.isEmpty else {
@@ -86,8 +80,10 @@ enum HostnameValidator {
         
         // Block localhost variants
         let lowercased = trimmed.lowercased()
-        if lowercased == "localhost" || lowercased == "localhost.localdomain" {
-            throw ValidationError.blockedLocalhost
+        if blockLocalhost {
+            if lowercased == "localhost" || lowercased == "localhost.localdomain" {
+                throw ValidationError.blockedLocalhost
+            }
         }
         // SECURITY: Reject octal/hex/decimal IP notation BEFORE standard parsing.
         // macOS IPv4Address("0177.0.0.1") resolves to 177.0.0.1, but other systems
@@ -107,6 +103,8 @@ enum HostnameValidator {
         
         return trimmed
     }
+    
+
     
     /// Rejects IP addresses written in octal, hexadecimal, or decimal notation
     /// that bypass standard IPv4Address parsing but resolve to dangerous addresses.

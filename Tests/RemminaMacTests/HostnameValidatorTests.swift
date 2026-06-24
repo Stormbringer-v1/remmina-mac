@@ -36,14 +36,14 @@ struct HostnameValidatorTests {
     @Test("Block localhost")
     func testBlockLocalhost() {
         #expect(throws: HostnameValidator.ValidationError.blockedLocalhost) {
-            try HostnameValidator.validate("localhost")
+            try HostnameValidator.validate("localhost", blockLocalhost: true)
         }
     }
     
     @Test("Block localhost case insensitive")
     func testBlockLocalhostCaseInsensitive() {
         #expect(throws: HostnameValidator.ValidationError.blockedLocalhost) {
-            try HostnameValidator.validate("LOCALHOST")
+            try HostnameValidator.validate("LOCALHOST", blockLocalhost: true)
         }
     }
     
