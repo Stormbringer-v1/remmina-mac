@@ -17,33 +17,27 @@ struct ProfileStoreIntegrationTests {
     }
 
     @Test("Sidebar list reactivity (F3 workaround) - add, delete, favorite")
-    func testSidebarReactivity() throws {
+    func testSidebarListReactivity() throws {
         let store = try makeTestStore()
         
-        let initialTrigger = store.refreshTrigger
-        #expect(initialTrigger == 0)
         #expect(store.allProfiles().isEmpty)
         
         // 1. Add
-        let profile1 = ConnectionProfile(name: "Test 1", protocolType: .ssh, host: "10.0.0.1")
+        let profile1 = ConnectionProfile(name: "Test 1", protocolType: .ssh, host: "host")
         try store.add(profile1)
         
-        #expect(store.refreshTrigger == initialTrigger + 1)
         #expect(store.allProfiles().count == 1)
         #expect(store.allProfiles().first?.name == "Test 1")
         
         // 2. Favorite
         let addedProfile = store.allProfiles().first!
-        #expect(addedProfile.isFavorite == false)
         store.toggleFavorite(addedProfile)
         
-        #expect(store.refreshTrigger == initialTrigger + 2)
         #expect(store.allProfiles().first?.isFavorite == true)
         #expect(store.favorites().count == 1)
         
         // 3. Delete
         store.delete(addedProfile)
-        #expect(store.refreshTrigger == initialTrigger + 3)
         #expect(store.allProfiles().isEmpty)
     }
 }

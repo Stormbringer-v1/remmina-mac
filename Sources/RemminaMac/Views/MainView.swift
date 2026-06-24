@@ -12,10 +12,12 @@ struct MainView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ConnectionManager.self) private var connectionManager
 
-    // Explicit @State array — refreshed via refreshProfiles() after every mutation.
-    // @Query is not used because it does not reliably trigger view invalidation
-    // inside NavigationSplitView on macOS after modelContext.insert().
-    @State private var allProfiles: [ConnectionProfile] = []
+    // @Query is the correct live data source for SwiftData in SwiftUI.
+    // Root cause of previous failures: @Query was added but filteredProfiles still
+    // called profileStore.search()/recents() (manual fetches) instead of filtering
+    // the @Query array in-memory — so the sidebar read stale data even though @Query
+    // had updated. Fix: @Query feeds allProfiles; filteredProfiles filters it in-memory.
+    @Query(sort: \ConnectionProfile.name, order: .forward) private var allProfiles: [ConnectionProfile]
 
     @State private var selectedProfile: ConnectionProfile?
     @State private var searchText = ""
@@ -52,7 +54,6 @@ struct MainView: View {
         .searchable(text: $searchText, prompt: "Search profiles (⌘F)")
         .onAppear {
             profileStore = ProfileStore(modelContext: modelContext)
-            refreshProfiles()
             // Auto-connect profiles marked "Connect on open"
             autoConnectOnOpen()
         }
@@ -73,7 +74,6 @@ struct MainView: View {
             ProfileEditView(mode: .create) { profile, password in
                 do {
                     try profileStore?.add(profile)
-                    refreshProfiles()
                     if let password = password, !password.isEmpty {
                         if !KeychainStore.shared.savePassword(password, for: profile.id) {
                             validationError = "Unable to save password to Keychain. Check System Settings → Privacy & Security."
@@ -103,7 +103,6 @@ struct MainView: View {
                     }
                     // password == nil means user didn't touch the password field
                     profileStore?.save()
-                    refreshProfiles()
                 }
             }
         }
@@ -195,10 +194,11 @@ struct MainView: View {
             Image(systemName: "desktopcomputer")
                 .font(.system(size: 64))
                 .foregroundStyle(.tertiary)
-            Text("No Profile Selected")
+                .accessibilityHidden(true)
+            Text(allProfiles.isEmpty ? "Welcome to RemminaMac" : "No Profile Selected")
                 .font(.title2)
                 .foregroundStyle(.secondary)
-            Text("Select a profile from the sidebar or create a new one")
+            Text(allProfiles.isEmpty ? "Create your first connection profile to get started" : "Select a profile from the sidebar or create a new one")
                 .font(.body)
                 .foregroundStyle(.tertiary)
             Button("New Profile") {
@@ -264,7 +264,6 @@ struct MainView: View {
 
         Button(profile.isFavorite ? "Unfavorite" : "Favorite") {
             profileStore?.toggleFavorite(profile)
-            refreshProfiles()
         }
 
         Button("Copy Host") {
@@ -293,14 +292,7 @@ struct MainView: View {
 
     // MARK: - Helpers
 
-    /// Re-fetch all profiles from the model context into the @State array.
-    /// Called after every mutation to guarantee the sidebar reflects the latest data.
-    private func refreshProfiles() {
-        let descriptor = FetchDescriptor<ConnectionProfile>(
-            sortBy: [SortDescriptor(\.name, order: .forward)]
-        )
-        allProfiles = (try? modelContext.fetch(descriptor)) ?? []
-    }
+
 
     private var filteredProfiles: [ConnectionProfile] {
         var result = allProfiles
@@ -330,7 +322,6 @@ struct MainView: View {
 
     private func connectToProfile(_ profile: ConnectionProfile) {
         profileStore?.markConnected(profile)
-        refreshProfiles()
         connectionManager.openSession(for: profile)
     }
 
@@ -347,7 +338,6 @@ struct MainView: View {
             selectedProfile = nil
         }
         profileStore?.delete(profile)
-        refreshProfiles()
     }
 
     /// Auto-connect profiles marked "Connect on open" at app launch
@@ -397,7 +387,6 @@ struct MainView: View {
                 }
                 
                 if successCount > 0 {
-                    refreshProfiles()
                     importCount = successCount
                     importAlert = true
                 }
