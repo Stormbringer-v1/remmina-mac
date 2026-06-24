@@ -51,3 +51,7 @@ playground.xcworkspace
 
 # Logs
 *.log
+
+# Build distribution
+dist/
+
