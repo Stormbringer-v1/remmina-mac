@@ -386,4 +386,116 @@ struct SecurityTests {
         profile.protocolRawValue = "TELNET" // Invalid
         #expect(profile.protocolType == .ssh) // Should default
     }
+    
+    // MARK: - SSH Askpass Pipe FD 3 Bug Proof
+    
+    @Test("Prove askpass pipe fd 3 bug by showing fd 3 is not inherited/mapped")
+    func testAskpassPipeFD3Bug() throws {
+        // Replicate openpty setup
+        var master: Int32 = -1
+        var slave: Int32 = -1
+        let rc = openpty(&master, &slave, nil, nil, nil)
+        #expect(rc == 0)
+        
+        defer {
+            if master >= 0 { close(master) }
+            if slave >= 0 { close(slave) }
+        }
+        
+        // Replicate pipe setup
+        var pipeFDs: [Int32] = [-1, -1]
+        let pipeRc = pipe(&pipeFDs)
+        #expect(pipeRc == 0)
+        
+        defer {
+            if pipeFDs[0] >= 0 { close(pipeFDs[0]) }
+            if pipeFDs[1] >= 0 { close(pipeFDs[1]) }
+        }
+        
+        // Write a test password to the pipe
+        let password = "SecretTestPassword123"
+        let pwdData = Data(password.utf8)
+        pwdData.withUnsafeBytes { ptr in
+            if let base = ptr.baseAddress {
+                _ = Foundation.write(pipeFDs[1], base, ptr.count)
+            }
+        }
+        // Close write end of the pipe immediately after writing, as in SSHSession
+        close(pipeFDs[1])
+        pipeFDs[1] = -1
+        
+        // Create temporary askpass-like script that attempts to read from fd 3
+        let tmpDir = FileManager.default.temporaryDirectory
+        let scriptPath = tmpDir.appendingPathComponent("test_askpass_\(UUID().uuidString).sh").path
+        
+        let scriptContent = """
+        #!/bin/bash
+        cat <&3 2>&1
+        """
+        
+        let attrs: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
+        let created = FileManager.default.createFile(
+            atPath: scriptPath,
+            contents: scriptContent.data(using: .utf8),
+            attributes: attrs
+        )
+        #expect(created)
+        
+        defer {
+            try? FileManager.default.removeItem(atPath: scriptPath)
+        }
+        
+        // Replicate Process setup from SSHSession
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = [scriptPath]
+        
+        var env = ProcessInfo.processInfo.environment
+        env["TERM"] = "xterm-256color"
+        proc.environment = env
+        
+        let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
+        proc.standardInput = slaveHandle
+        proc.standardOutput = slaveHandle
+        proc.standardError = slaveHandle
+        
+        // Run the process
+        try proc.run()
+        
+        // Read output from PTY master
+        var outputData = Data()
+        let start = Date()
+        
+        // Set the master descriptor to non-blocking so we can read without hanging forever
+        let flags = fcntl(master, F_GETFL)
+        _ = fcntl(master, F_SETFL, flags | O_NONBLOCK)
+        
+        // Read until EOF or timeout
+        while Date().timeIntervalSince(start) < 2.0 {
+            var buffer = [UInt8](repeating: 0, count: 1024)
+            let bytesRead = read(master, &buffer, buffer.count)
+            if bytesRead > 0 {
+                outputData.append(buffer, count: bytesRead)
+            } else if bytesRead < 0 {
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    Thread.sleep(forTimeInterval: 0.05)
+                    continue
+                }
+                break
+            } else {
+                // bytesRead == 0 (EOF)
+                break
+            }
+        }
+        
+        proc.terminate()
+        proc.waitUntilExit()
+        
+        let outputString = String(data: outputData, encoding: .utf8) ?? ""
+        
+        // Verify that the output does NOT contain the password (proving the bug)
+        // It will contain something like "test_askpass_*.sh: line 2: 3: Bad file descriptor" or empty
+        #expect(!outputString.contains(password), "Expected password not to be read from fd 3")
+        #expect(outputString.contains("Bad file descriptor") || outputString.isEmpty, "Expected fd 3 to be closed or invalid, output was: \(outputString)")
+    }
 }
