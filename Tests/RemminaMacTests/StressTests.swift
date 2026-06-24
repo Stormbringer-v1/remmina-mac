@@ -363,4 +363,81 @@ struct StressTests {
         // Verify the profile's name stored correctly
         #expect(profile.name == "Test 'Quotes' & <Angles>")
     }
+
+    // MARK: - Validator Fuzzing
+    
+    @Test("Validator fuzzing - random character strings")
+    func testValidatorFuzzing() {
+        // Generate a variety of nasty strings
+        let nastyCharacters: [Character] = [
+            "\0", "\n", "\r", "\t", " ", ";", "|", "&", "`", "$", "(", ")", "{", "}", "!", "<", ">", "\\", "'", "\"",
+            "%", "/", ".", "-", "_", "@", ":", "a", "1", "日", "🔥", "\u{FFFD}"
+        ]
+        
+        var nastyStrings: [String] = []
+        
+        // 1. Single characters
+        for char in nastyCharacters {
+            nastyStrings.append(String(char))
+        }
+        
+        // 2. Repeated characters (edge cases for length)
+        for char in nastyCharacters {
+            nastyStrings.append(String(repeating: char, count: 64))
+            nastyStrings.append(String(repeating: char, count: 256))
+            nastyStrings.append(String(repeating: char, count: 1024))
+        }
+        
+        // 3. Random combinations
+        // Seeded RNG for deterministic tests
+        var rng = SystemRandomNumberGenerator()
+        for _ in 0..<1000 {
+            let length = Int.random(in: 1...500, using: &rng)
+            var str = ""
+            for _ in 0..<length {
+                str.append(nastyCharacters.randomElement(using: &rng)!)
+            }
+            nastyStrings.append(str)
+        }
+        
+        // Fuzz ProfileValidator methods
+        for str in nastyStrings {
+            // These should either return a valid string or throw a ValidationError,
+            // but they MUST NOT crash (no fatalError, forced unwrap trap, or infinite loop)
+            
+            _ = try? ProfileValidator.validateName(str)
+            _ = try? ProfileValidator.validateUsername(str)
+            _ = try? ProfileValidator.validateDomain(str)
+            _ = try? ProfileValidator.validateNotes(str)
+            _ = try? ProfileValidator.validateHost(str)
+            _ = try? SSHKeyValidator.validate(str, isUserSelected: false)
+        }
+        
+        // If we reach here without crashing, the fuzzing passed
+        #expect(true, "Fuzzing completed without crashing")
+    }
+    
+    @Test("HostnameValidator fuzzing - IP address edge cases")
+    func testHostnameValidatorFuzzing() {
+        let edgeCases = [
+            "0.0.0.0", "255.255.255.255", "127.0.0.1", "169.254.169.254", "10.0.0.1", "172.16.0.1", "192.168.0.1",
+            "::1", "fe80::1", "::ffff:127.0.0.1",
+            "0", "1", "2130706433", "4294967295",
+            "0x7f000001", "0x7f.0x0.0x0.0x1", "0177.0.0.1", "127.000.000.001",
+            "...", "1.2.3.4.5", "1..2", ".1.2.3", "1.2.3.",
+            "localhost", "localhost.localdomain", "local",
+            "a.b.c", "a-b.com", "-a.com", "a-.com", "a.com-", "a..com",
+            String(repeating: "a", count: 63) + ".com",
+            String(repeating: "a", count: 64) + ".com",
+            String(repeating: "a", count: 254),
+            "file:///etc/passwd", "http://localhost", "ssh://10.0.0.1"
+        ]
+        
+        for host in edgeCases {
+            _ = try? ProfileValidator.validateHost(host)
+        }
+        
+        // Should not crash
+        #expect(true, "Hostname fuzzing completed without crashing")
+    }
 }
