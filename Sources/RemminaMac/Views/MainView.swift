@@ -41,8 +41,19 @@ struct MainView: View {
 
     var body: some View {
         NavigationSplitView {
-            sidebarContent
-                .navigationSplitViewColumnWidth(min: 250, ideal: 280, max: 350)
+            MainSidebarView(
+                profiles: filteredProfiles,
+                selectedProfile: $selectedProfile,
+                filterMode: $filterMode,
+                onConnect: { connectToProfile($0) },
+                onFavorite: { profileStore?.toggleFavorite($0) },
+                onEdit: { profile in
+                    selectedProfile = profile
+                    showingEditProfile = true
+                },
+                onDelete: { requestDelete($0) }
+            )
+            .navigationSplitViewColumnWidth(min: 250, ideal: 280, max: 350)
         } detail: {
             detailContent
         }
@@ -140,34 +151,7 @@ struct MainView: View {
         }
     }
 
-    // MARK: - Sidebar
-
-    private var sidebarContent: some View {
-        VStack(spacing: 0) {
-            // Filter picker
-            Picker("Filter", selection: $filterMode) {
-                ForEach(FilterMode.allCases, id: \.self) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-
-            // Profile list
-            List(filteredProfiles, id: \.id, selection: $selectedProfile) { profile in
-                ProfileRowView(profile: profile)
-                    .tag(profile)
-                    .onTapGesture(count: 2) {
-                        connectToProfile(profile)
-                    }
-                    .contextMenu {
-                        profileContextMenu(for: profile)
-                    }
-            }
-            .listStyle(.sidebar)
-        }
-    }
+    // Removed sidebarContent
 
     // MARK: - Detail
 
@@ -182,33 +166,17 @@ struct MainView: View {
                     onDelete: { requestDelete(profile) }
                 )
             } else {
-                emptyState
+                MainEmptyStateView(
+                    hasNoProfiles: allProfiles.isEmpty,
+                    onNewProfile: { showingNewProfile = true }
+                )
             }
         } else {
             SessionTabView()
         }
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "desktopcomputer")
-                .font(.system(size: 64))
-                .foregroundStyle(.tertiary)
-                .accessibilityHidden(true)
-            Text(allProfiles.isEmpty ? "Welcome to RemminaMac" : "No Profile Selected")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-            Text(allProfiles.isEmpty ? "Create your first connection profile to get started" : "Select a profile from the sidebar or create a new one")
-                .font(.body)
-                .foregroundStyle(.tertiary)
-            Button("New Profile") {
-                showingNewProfile = true
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
+    // Removed emptyState
 
     // MARK: - Toolbar
 
@@ -252,43 +220,7 @@ struct MainView: View {
         }
     }
 
-    // MARK: - Context Menu
-
-    @ViewBuilder
-    private func profileContextMenu(for profile: ConnectionProfile) -> some View {
-        Button("Connect") {
-            connectToProfile(profile)
-        }
-
-        Divider()
-
-        Button(profile.isFavorite ? "Unfavorite" : "Favorite") {
-            profileStore?.toggleFavorite(profile)
-        }
-
-        Button("Copy Host") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(profile.host, forType: .string)
-        }
-
-        if !profile.username.isEmpty {
-            Button("Copy Username") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(profile.username, forType: .string)
-            }
-        }
-
-        Divider()
-
-        Button("Edit…") {
-            selectedProfile = profile
-            showingEditProfile = true
-        }
-
-        Button("Delete", role: .destructive) {
-            requestDelete(profile)
-        }
-    }
+    // Removed profileContextMenu
 
     // MARK: - Helpers
 
