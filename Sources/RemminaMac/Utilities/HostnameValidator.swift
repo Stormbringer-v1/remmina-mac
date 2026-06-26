@@ -93,9 +93,9 @@ enum HostnameValidator {
         
         // Try to parse as IP address
         if let ipAddress = IPv4Address(trimmed) {
-            try validateIPv4(ipAddress, blockPrivateRanges: blockPrivateRanges)
+            try validateIPv4(ipAddress, blockPrivateRanges: blockPrivateRanges, blockLocalhost: blockLocalhost)
         } else if let ipAddress = IPv6Address(trimmed) {
-            try validateIPv6(ipAddress)
+            try validateIPv6(ipAddress, blockLocalhost: blockLocalhost)
         } else {
             // Validate as hostname/FQDN
             try validateHostnameFormat(trimmed)
@@ -137,7 +137,7 @@ enum HostnameValidator {
         }
     }
     
-    private static func validateIPv4(_ ip: IPv4Address, blockPrivateRanges: Bool) throws {
+    private static func validateIPv4(_ ip: IPv4Address, blockPrivateRanges: Bool, blockLocalhost: Bool) throws {
         let octets = ip.rawValue
         
         // Block 0.0.0.0
@@ -146,7 +146,7 @@ enum HostnameValidator {
         }
         
         // Block 127.0.0.0/8 (loopback)
-        if octets[0] == 127 {
+        if blockLocalhost && octets[0] == 127 {
             throw ValidationError.blockedLoopback
         }
         
@@ -172,9 +172,9 @@ enum HostnameValidator {
         }
     }
     
-    private static func validateIPv6(_ ip: IPv6Address) throws {
+    private static func validateIPv6(_ ip: IPv6Address, blockLocalhost: Bool) throws {
         // Block ::1 (loopback)
-        if ip == IPv6Address.loopback {
+        if blockLocalhost && ip == IPv6Address.loopback {
             throw ValidationError.blockedLoopback
         }
         
