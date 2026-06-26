@@ -229,16 +229,10 @@ final class RDPSession: SessionProtocol {
             args.append("/d:\(domain)")
         }
 
-        // SECURITY: Password is passed via environment variable, NOT as CLI arg.
+        // SECURITY: Password is NOT passed as a CLI arg or environment variable.
         // CLI args are visible in `ps aux` to all users on the system.
-        // xfreerdp reads password from /p: but we use environment to avoid exposure.
+        // We use the PTY /from-stdin approach: write password after process starts.
         var env = ProcessInfo.processInfo.environment
-        if let pwd = password, !pwd.isEmpty {
-            // Use /from-stdin approach: write password after process starts
-            // OR pass via environment variable which xfreerdp supports
-            args.append("/p:$REMMINA_RDP_PASS")
-            env["REMMINA_RDP_PASS"] = pwd
-        }
 
         // Display settings
         args.append("/size:\(framebufferWidth)x\(framebufferHeight)")

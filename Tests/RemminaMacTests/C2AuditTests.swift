@@ -263,18 +263,15 @@ struct C2AuditTests {
         }
         guard let root = packageRoot else { return }
 
-        let rdpPath = root.appendingPathComponent("Sources/RemminaMac/Protocols/RDP/RDPSession.swift")
-        let source = try String(contentsOf: rdpPath, encoding: .utf8)
-
-        // The literal "/p:$REMMINA_RDP_PASS" should appear in the args construction.
-        let containsLiteralArg = source.contains(#""/p:$REMMINA_RDP_PASS""#)
-
-        // CONFIRMED BUG: this line exists, proving the shell var is passed literally.
-        #expect(containsLiteralArg == true,
-                """
-                Expected to find literal "/p:$REMMINA_RDP_PASS" in RDPSession.swift.
-                If this test fails, the bug was already fixed — update this test.
-                """)
+        let rdpSessionPath = root.appendingPathComponent("Sources/RemminaMac/Protocols/RDP/RDPSession.swift").path
+        let sourceCode = try String(contentsOf: URL(fileURLWithPath: rdpSessionPath), encoding: .utf8)
+        let containsLiteralArg = sourceCode.contains("\"/p:$REMMINA_RDP_PASS\"")
+        
+        // BUG FIXED in S-2: This line should no longer exist.
+        #expect(
+            containsLiteralArg == false,
+            "Literal \"/p:$REMMINA_RDP_PASS\" should have been removed from RDPSession.swift as part of S-2."
+        )
 
         // Also verify that xfreerdp does NOT expand shell variables.
         // We prove this by checking that Process.arguments does not use a shell:
