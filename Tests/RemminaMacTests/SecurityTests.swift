@@ -477,7 +477,8 @@ struct SecurityTests {
             if bytesRead > 0 {
                 outputData.append(buffer, count: bytesRead)
             } else if bytesRead < 0 {
-                if errno == EAGAIN || errno == EWOULDBLOCK {
+                let err = errno
+                if err == EAGAIN || err == EWOULDBLOCK || err == EINTR {
                     Thread.sleep(forTimeInterval: 0.05)
                     continue
                 }
@@ -628,7 +629,8 @@ struct SecurityTests {
             if bytesRead > 0 {
                 outputData.append(buffer, count: bytesRead)
             } else if bytesRead < 0 {
-                if errno == EAGAIN || errno == EWOULDBLOCK {
+                let err = errno
+                if err == EAGAIN || err == EWOULDBLOCK || err == EINTR {
                     Thread.sleep(forTimeInterval: 0.05)
                     continue
                 }
