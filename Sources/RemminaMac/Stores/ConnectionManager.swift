@@ -147,7 +147,7 @@ final class ConnectionManager: SessionDelegate {
 
     private func updateDockBadge() {
         let count = activeCount
-        NSApp.dockTile.badgeLabel = count > 0 ? "\(count)" : nil
+        NSApp?.dockTile.badgeLabel = count > 0 ? "\(count)" : nil
     }
 
     // MARK: - SessionDelegate
