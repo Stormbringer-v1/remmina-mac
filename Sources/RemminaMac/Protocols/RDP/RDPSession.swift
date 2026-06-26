@@ -24,7 +24,9 @@ final class RDPSession: SessionProtocol {
     private let host: String
     private let port: Int
     private let username: String
-    private let password: String?
+    /// Held only until written to the xfreerdp PTY stdin in startXFreerdp().
+    /// Nilled immediately after the write to minimize in-memory lifetime.
+    private var password: String?
     private let domain: String
 
     private var process: Process?
@@ -284,6 +286,10 @@ final class RDPSession: SessionProtocol {
                             _ = Foundation.write(self.masterFD, base, ptr.count)
                         }
                     }
+                    // S-3: Drop the password immediately after writing to PTY.
+                    // Setting to nil releases the Swift String heap allocation.
+                    // Note: Swift does not guarantee zeroing of String storage on dealloc.
+                    self.password = nil
                 }
             }
 

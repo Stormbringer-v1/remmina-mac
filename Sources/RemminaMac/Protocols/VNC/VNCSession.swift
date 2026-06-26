@@ -22,7 +22,9 @@ final class VNCSession: SessionProtocol {
     // Connection
     private let host: String
     private let port: Int
-    private let password: String?
+    /// Held only until the VNC DES auth challenge is answered in performVNCAuth().
+    /// Nilled immediately after use to minimize in-memory lifetime.
+    private var password: String?
     private var inputStream: InputStream?
     private var outputStream: OutputStream?
     private var streamQueue = DispatchQueue(label: "com.remmina-mac.vnc.stream", qos: .userInitiated)
@@ -327,6 +329,11 @@ final class VNCSession: SessionProtocol {
         // DES encrypt the challenge with the password
         let response = vncEncryptChallenge(challenge: challenge, password: pwd)
         writeData(Data(response))
+
+        // S-3: Drop the password — it has been consumed to answer the auth challenge.
+        // The session does not need it again. Setting to nil releases the String.
+        // Note: Swift does not guarantee zeroing of String storage on dealloc.
+        password = nil
     }
 
     /// VNC DES encryption: password is truncated/padded to 8 bytes,

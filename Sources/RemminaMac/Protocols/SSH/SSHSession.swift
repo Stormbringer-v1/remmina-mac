@@ -27,7 +27,9 @@ final class SSHSession: SessionProtocol {
     private let host: String
     private let port: Int
     private let username: String
-    private let password: String?
+    /// Held only until written to the credential pipe in createSecureAskpassScript().
+    /// Nilled immediately after use to minimize in-memory lifetime.
+    private var password: String?
     private let sshKeyPath: String
 
     /// Direct byte feed handler for SwiftTerm — bypasses string conversion
@@ -417,6 +419,13 @@ final class SSHSession: SessionProtocol {
             }
             close(pipeFDs[1])
             self.askpassPipeFD[1] = -1
+
+            // S-3: Drop the password immediately — it has been written to the pipe
+            // and is no longer needed for the lifetime of the session.
+            // Setting to nil releases the Swift String heap allocation.
+            // Note: Swift does not guarantee zeroing of String storage on dealloc;
+            // this eliminates the reference but not necessarily the backing bytes.
+            self.password = nil
 
             // Script reads from fd 3 which will be the pipe read-end
             scriptContent = """
