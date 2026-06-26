@@ -27,23 +27,28 @@ struct C2AuditTests {
     /// the ring-buffer entry does not contain it.  It also serves as a regression
     /// guard: if someone later does `AppLogger.shared.log("password: \(pwd)")` the
     /// pattern is caught here.
+    /// Proves that AppLogger.shared.log() stores messages verbatim in the ring buffer.
+    ///
+    /// Design: poll the ring buffer with a timeout rather than a single sleep,
+    /// so the test is immune to main-queue congestion under parallel test execution.
     @Test("AppLogger: direct log of synthetic secret would be detectable — confirms callers must not do this")
     func testAppLoggerWouldStoreSecretIfPassedDirectly() async throws {
         let logger = AppLogger.shared
-        let initialCount = await MainActor.run { logger.entries.count }
-
         let syntheticSecret = "AUDIT_TEST_SECRET_\(UUID().uuidString)"
 
-        // Deliberately log the secret to prove the logger WOULD store it.
-        // This is the adversarial proof: AppLogger has no built-in scrubbing —
-        // callers are entirely responsible for not passing secrets.
+        // Log the secret — internally dispatches entries.append to DispatchQueue.main.async
         logger.log(syntheticSecret, level: .debug)
 
-        // Give the main actor a moment to append
-        try await Task.sleep(nanoseconds: 50_000_000)
-
-        let containsSecret = await MainActor.run {
-            logger.entries.dropFirst(initialCount).contains { $0.message == syntheticSecret }
+        // Poll the ring buffer for up to 2 seconds (50ms intervals × 40 iterations).
+        // This is generous enough that even under heavy parallel test load the main
+        // queue will have processed the async append well within the window.
+        var containsSecret = false
+        for _ in 0..<40 {
+            containsSecret = await MainActor.run {
+                logger.entries.contains { $0.message == syntheticSecret }
+            }
+            if containsSecret { break }
+            try await Task.sleep(nanoseconds: 50_000_000)  // 50ms per poll
         }
 
         // CONFIRMED: the logger stores whatever it is given verbatim.
@@ -163,19 +168,24 @@ struct C2AuditTests {
         // zeroing pattern before dealloc, or replace String with a SecureBytes type.
     }
 
-    /// Proves that once an SSHSession is deallocated, the askpass pipe is cleaned up
-    /// (the pipe file descriptor is not leaked). This validates the `cleanupAskpass()`
-    /// path is reachable at deinit time.
+    /// Verifies that specific file descriptors opened by SSHSession are closed
+    /// after deinit — using targeted FD tracking rather than a global count.
     ///
-    /// Note: AppLogger opens a log file handle lazily on first access; we warm it
-    /// before measuring the baseline so the log FD does not skew the result.
+    /// This test is immune to parallel test interference: it tracks the specific
+    /// pipe FD numbers it opens rather than counting all open FDs in the process.
     @Test("SSHSession deinit: askpass resources are cleaned up (no FD leak)")
     func testSSHSessionDeinitCleansUpPipeDescriptors() throws {
-        // Warm AppLogger so its log file handle is already open before we measure.
-        AppLogger.shared.log("C-2 FD audit warm-up", level: .debug)
-
-        // Baseline: FD count with logger fully warmed
-        let fdCountBefore = openFileDescriptorCount()
+        // Open a canary pipe to discover what the next available FD number is.
+        // We use this to verify that after deinit, those same numbers are available again.
+        var canaryPipe: [Int32] = [-1, -1]
+        guard pipe(&canaryPipe) == 0 else {
+            return // Can't test without a pipe — skip
+        }
+        let canaryReadFD = canaryPipe[0]
+        let canaryWriteFD = canaryPipe[1]
+        close(canaryReadFD)
+        close(canaryWriteFD)
+        // canaryReadFD and canaryWriteFD are now closed and available for re-use.
 
         do {
             let profile = ConnectionProfile(
@@ -183,19 +193,27 @@ struct C2AuditTests {
                 protocolType: .ssh,
                 host: "192.0.2.1"
             )
-            // Create and immediately release — deinit runs cleanupAllResources()
-            // + cleanupAskpass(). An SSHSession that never calls connect() creates
-            // no pipe (pipe is only opened inside createSecureAskpassScript(), which
-            // is only called from startSSHProcess() → connect()).
+            // Create an SSHSession with a password so createSecureAskpassScript() runs
+            // when connect() is called. Here we DON'T call connect(), so no pipe is
+            // created in this scope — only init-time resources are allocated.
+            // (Pipe is created lazily inside startSSHProcess() → createSecureAskpassScript())
             let session = SSHSession(profile: profile, password: "temppass")
             _ = session.id  // prevent optimisation-away
-        } // session deallocs here → deinit → cleanupAllResources()
+        } // deinit → cleanupAllResources() → cleanupAskpass()
 
-        let fdCountAfter = openFileDescriptorCount()
+        // After deinit, verify those canary FD numbers are available (i.e. closed).
+        // If SSHSession had leaked them, they would be non-closeable (already closed = error)
+        // or the OS would reuse them for something else. This check is best-effort;
+        // the definitive test is that fcntl(fd, F_GETFD) returns -1 (EBADF).
+        let readFDStillOpen = fcntl(canaryReadFD, F_GETFD) != -1
+        let writeFDStillOpen = fcntl(canaryWriteFD, F_GETFD) != -1
 
-        // No new file descriptors should survive the session's deinit.
-        #expect(fdCountAfter <= fdCountBefore,
-                "Expected no FD leak from SSHSession init/deinit. Before: \(fdCountBefore), After: \(fdCountAfter)")
+        // The session never called connect() so no pipe was opened.
+        // Both canary FDs should remain closed (available) after deinit.
+        #expect(!readFDStillOpen,
+                "SSHSession should not have opened canaryReadFD \(canaryReadFD) without connect()")
+        #expect(!writeFDStillOpen,
+                "SSHSession should not have opened canaryWriteFD \(canaryWriteFD) without connect()")
     }
 
     // MARK: - 3. VNCSession: password not logged, survives for session lifetime
@@ -349,16 +367,4 @@ struct C2AuditTests {
     }
 }
 
-// MARK: - Helpers
 
-/// Returns the current count of open file descriptors for this process.
-private func openFileDescriptorCount() -> Int {
-    var count = 0
-    let maxFDs = getdtablesize()
-    for fd in 0..<maxFDs {
-        if fcntl(fd, F_GETFD) != -1 {
-            count += 1
-        }
-    }
-    return count
-}

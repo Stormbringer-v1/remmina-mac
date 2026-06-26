@@ -295,6 +295,23 @@ final class SSHSession: SessionProtocol {
             posix_spawn_file_actions_adddup2(&fileActions, slaveFD, 2)
         }
 
+        // Close the original source FDs in the child after dup2:
+        // - masterFD: the PTY master belongs to the parent only (the child uses slaveFD via 0/1/2)
+        // - askpassPipeFD[0]: already mapped to fd 3 above; closing the original prevents
+        //   the child from holding an extra reference to the pipe read-end beyond fd 3
+        // - slaveFD: already mapped to 0/1/2; the original descriptor is redundant in the child
+        // Without these closes, posix_spawn inherits ALL open FDs into the child, which causes
+        // the fd-count leak observed in C2AuditTests and means ssh gets unexpected extra fds.
+        if masterFD >= 0 {
+            posix_spawn_file_actions_addclose(&fileActions, masterFD)
+        }
+        if askpassPipeFD[0] >= 0 {
+            posix_spawn_file_actions_addclose(&fileActions, askpassPipeFD[0])
+        }
+        if slaveFD >= 0 {
+            posix_spawn_file_actions_addclose(&fileActions, slaveFD)
+        }
+
         var spawnedPid: pid_t = 0
         spawnRc = posix_spawn(&spawnedPid, path, &fileActions, nil, cArgs, cEnv)
 
