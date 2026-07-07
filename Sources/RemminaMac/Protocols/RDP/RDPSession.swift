@@ -234,7 +234,7 @@ final class RDPSession: SessionProtocol {
         // SECURITY: Password is NOT passed as a CLI arg or environment variable.
         // CLI args are visible in `ps aux` to all users on the system.
         // We use the PTY /from-stdin approach: write password after process starts.
-        var env = ProcessInfo.processInfo.environment
+        let env = ProcessInfo.processInfo.environment
 
         // Display settings
         args.append("/size:\(framebufferWidth)x\(framebufferHeight)")

@@ -30,3 +30,8 @@ let package = Package(
         )
     ]
 )
+
+// App bundle packaging (Info.plist, entitlements, AppIcon.icns) is handled
+// by `build_app.sh`. The `swift run` workflow does not require Resources/.
+// See build_app.sh and Resources/RemminaMac.entitlements for the bundle
+// configuration; see README "Sandbox & External Tools" for the policy.

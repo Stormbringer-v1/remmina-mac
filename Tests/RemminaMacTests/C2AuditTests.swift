@@ -2,20 +2,19 @@ import Testing
 import Foundation
 @testable import RemminaMac
 
-/// C-2 Security Audit: Password lifetime in session objects and AppLogger redaction.
+/// Security audit: password lifetime in session objects and AppLogger redaction.
 ///
-/// Hypothesis (from PLAN.md F1 review):
+/// Each test below proves or refutes a hypothesis about credential handling:
 ///   1. AppLogger.shared.log() never interpolates passwords, SSH key material, or
 ///      Keychain credential values into any log entry.
-///   2. Passwords stored in SSHSession/VNCSession/RDPSession survive in memory
-///      beyond when they are needed (Swift String has no guaranteed zeroing).
-///   3. RDP CLI arg building has a mis-configuration: "/p:$REMMINA_RDP_PASS" is
-///      passed literally to xfreerdp — the shell variable is NOT expanded because
-///      Process.arguments does not invoke a shell.
+///   2. Passwords stored in SSHSession/VNCSession/RDPSession are released as soon
+///      as their single consumption site completes (Swift String release removes
+///      the reference but does not guarantee backing-memory zeroing).
+///   3. RDP CLI arg building no longer relies on shell-style variable expansion;
+///      credentials are delivered solely through the PTY stdin path.
 ///
-/// Flow C mandate: prove or refute each hypothesis with evidence.
 /// This file is test-only — no production source is modified.
-@Suite("C-2 Security Audit — Password Lifetime & AppLogger Redaction")
+@Suite("Security Audit — Password Lifetime & AppLogger Redaction")
 struct C2AuditTests {
 
     // MARK: - 1. AppLogger: no credential in any log string
@@ -64,7 +63,7 @@ struct C2AuditTests {
     /// This is a static source-level audit run at test time.
     @Test("Static audit: no production log call interpolates password/key variable names")
     func testNoLogCallInterpolatesCredentialVariables() throws {
-        // Files in scope per C-2 brief
+        // Production files in scope for this credential-handling audit
         let sourceFiles = [
             "Sources/RemminaMac/Protocols/SSH/SSHSession.swift",
             "Sources/RemminaMac/Protocols/VNC/VNCSession.swift",

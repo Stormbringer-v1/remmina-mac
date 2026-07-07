@@ -55,3 +55,10 @@ playground.xcworkspace
 # Build distribution
 dist/
 
+# Local-only private workspace — keep out of the public repo defensively.
+# These were previously excluded via .git/info/exclude; duplicating here
+# ensures they stay ignored even on fresh clones.
+.claude/
+.agents/
+docs/private/
+

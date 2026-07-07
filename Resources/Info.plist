@@ -7,9 +7,9 @@
     <key>CFBundleExecutable</key>
     <string>RemminaMac</string>
     <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
+    <string>AppIcon.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>com.remmina-mac.app</string>
+    <string>com.remmina-mac</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
