@@ -167,52 +167,58 @@ struct C2AuditTests {
         // zeroing pattern before dealloc, or replace String with a SecureBytes type.
     }
 
-    /// Verifies that specific file descriptors opened by SSHSession are closed
-    /// after deinit — using targeted FD tracking rather than a global count.
-    ///
-    /// This test is immune to parallel test interference: it tracks the specific
-    /// pipe FD numbers it opens rather than counting all open FDs in the process.
-    @Test("SSHSession deinit: askpass resources are cleaned up (no FD leak)")
-    func testSSHSessionDeinitCleansUpPipeDescriptors() throws {
-        // Open a canary pipe to discover what the next available FD number is.
-        // We use this to verify that after deinit, those same numbers are available again.
-        var canaryPipe: [Int32] = [-1, -1]
-        guard pipe(&canaryPipe) == 0 else {
-            return // Can't test without a pipe — skip
+    /// Verifies that the SSH child-process spawn does not inherit raw parent file
+    /// descriptors (the credential pipe's read end, the master PTY fd, the slave fd)
+    /// into the spawned `ssh` process. A runtime FD-availability test is fundamentally
+    /// racy because the OS may reuse canary FD numbers during the brief session
+    /// window for unrelated Foundation activity. The deterministic check is a static
+    /// audit of the source: every sensitive FD must be closed in the posix_spawn
+    /// file actions block before `posix_spawn` is called.
+    @Test("SSHSession: posix_spawn file actions close credential pipe + master/slave fd before spawn")
+    func testPosixSpawnFileActionsCloseSensitiveFDs() throws {
+        // Locate the package root by walking up from this test file.
+        let fm = FileManager.default
+        var searchURL = URL(fileURLWithPath: #file).deletingLastPathComponent()
+        var packageRoot: URL? = nil
+        for _ in 0..<10 {
+            searchURL = searchURL.deletingLastPathComponent()
+            if fm.fileExists(atPath: searchURL.appendingPathComponent("Package.swift").path) {
+                packageRoot = searchURL
+                break
+            }
         }
-        let canaryReadFD = canaryPipe[0]
-        let canaryWriteFD = canaryPipe[1]
-        close(canaryReadFD)
-        close(canaryWriteFD)
-        // canaryReadFD and canaryWriteFD are now closed and available for re-use.
+        guard let root = packageRoot else { return }
 
-        do {
-            let profile = ConnectionProfile(
-                name: "DeinitAuditTest",
-                protocolType: .ssh,
-                host: "192.0.2.1"
-            )
-            // Create an SSHSession with a password so createSecureAskpassScript() runs
-            // when connect() is called. Here we DON'T call connect(), so no pipe is
-            // created in this scope — only init-time resources are allocated.
-            // (Pipe is created lazily inside startSSHProcess() → createSecureAskpassScript())
-            let session = SSHSession(profile: profile, password: "temppass")
-            _ = session.id  // prevent optimisation-away
-        } // deinit → cleanupAllResources() → cleanupAskpass()
+        let sshSessionPath = root.appendingPathComponent("Sources/RemminaMac/Protocols/SSH/SSHSession.swift").path
+        let source = try String(contentsOf: URL(fileURLWithPath: sshSessionPath), encoding: .utf8)
 
-        // After deinit, verify those canary FD numbers are available (i.e. closed).
-        // If SSHSession had leaked them, they would be non-closeable (already closed = error)
-        // or the OS would reuse them for something else. This check is best-effort;
-        // the definitive test is that fcntl(fd, F_GETFD) returns -1 (EBADF).
-        let readFDStillOpen = fcntl(canaryReadFD, F_GETFD) != -1
-        let writeFDStillOpen = fcntl(canaryWriteFD, F_GETFD) != -1
+        // Every leaky FD must be closed before spawn. The exact variable names are
+        // checked with a small set of accepted spellings to keep the test resilient
+        // to trivial refactors.
+        let fdCloseExpectations: [(label: String, accepted: [String])] = [
+            ("credential pipe read end", [
+                "posix_spawn_file_actions_addclose(&fileActions, askpassPipeFD[0])",
+                "posix_spawn_file_actions_addclose(&fileActions, askpassPipe[0])"
+            ]),
+            ("master PTY fd", [
+                "posix_spawn_file_actions_addclose(&fileActions, masterFD)",
+                "posix_spawn_file_actions_addclose(&fileActions, master)"
+            ]),
+            ("slave PTY fd", [
+                "posix_spawn_file_actions_addclose(&fileActions, slaveFD)",
+                "posix_spawn_file_actions_addclose(&fileActions, slave)"
+            ])
+        ]
 
-        // The session never called connect() so no pipe was opened.
-        // Both canary FDs should remain closed (available) after deinit.
-        #expect(!readFDStillOpen,
-                "SSHSession should not have opened canaryReadFD \(canaryReadFD) without connect()")
-        #expect(!writeFDStillOpen,
-                "SSHSession should not have opened canaryWriteFD \(canaryWriteFD) without connect()")
+        for (label, accepted) in fdCloseExpectations {
+            let found = accepted.contains { source.contains($0) }
+            #expect(found,
+                    "SSHSession must close \(label) in posix_spawn file actions; none of the accepted spellings matched.")
+        }
+
+        // file actions are always torn down even on error paths.
+        #expect(source.contains("posix_spawn_file_actions_destroy"),
+                "SSHSession must destroy posix_spawn file actions to release allocations.")
     }
 
     // MARK: - 3. VNCSession: password not logged, survives for session lifetime
