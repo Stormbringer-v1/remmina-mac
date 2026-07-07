@@ -18,7 +18,8 @@ final class SSHSession: SessionProtocol {
         }
     }
 
-    private var process: Process?
+    private var pid: pid_t = -1
+    private var processSource: DispatchSourceProcess?
     private var masterFD: Int32 = -1
     private var slaveFD: Int32 = -1
     private var readSource: DispatchSourceRead?
@@ -26,7 +27,9 @@ final class SSHSession: SessionProtocol {
     private let host: String
     private let port: Int
     private let username: String
-    private let password: String?
+    /// Held only until written to the credential pipe in createSecureAskpassScript().
+    /// Nilled immediately after use to minimize in-memory lifetime.
+    private var password: String?
     private let sshKeyPath: String
 
     /// Direct byte feed handler for SwiftTerm — bypasses string conversion
@@ -156,10 +159,15 @@ final class SSHSession: SessionProtocol {
         readSource?.cancel()
         readSource = nil
 
-        if let process = process, process.isRunning {
-            process.terminate()
+        processSource?.cancel()
+        processSource = nil
+
+        if pid > 0 {
+            kill(pid, SIGTERM)
+            var status: Int32 = 0
+            waitpid(pid, &status, WNOHANG)
+            pid = -1
         }
-        process = nil
 
         if masterFD >= 0 { close(masterFD); masterFD = -1 }
         if slaveFD >= 0 { close(slaveFD); slaveFD = -1 }
@@ -168,6 +176,14 @@ final class SSHSession: SessionProtocol {
     }
 
     // MARK: - SSH Process
+
+    private func translateStatus(_ status: Int32) -> Int32 {
+        if (status & 0x7f) == 0 {
+            return (status >> 8) & 0xff
+        } else {
+            return 128 + (status & 0x7f)
+        }
+    }
 
     private func startSSHProcess() {
         var master: Int32 = -1
@@ -187,8 +203,7 @@ final class SSHSession: SessionProtocol {
         self.masterFD = master
         self.slaveFD = slave
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        let path = "/usr/bin/ssh"
 
         var args: [String] = []
         args.append("-o")
@@ -217,7 +232,16 @@ final class SSHSession: SessionProtocol {
             args.append(host)
         }
 
-        proc.arguments = args
+        // Prepare arguments for posix_spawn
+        var cArgs: [UnsafeMutablePointer<CChar>?] = ([path] + args).map { strdup($0) }
+        cArgs.append(nil)
+        defer {
+            for ptr in cArgs {
+                if let p = ptr {
+                    free(p)
+                }
+            }
+        }
 
         // Set up environment — SECURE askpass
         var env = ProcessInfo.processInfo.environment
@@ -230,35 +254,113 @@ final class SSHSession: SessionProtocol {
             env["DISPLAY"] = ":0"
             AppLogger.shared.log("SSH: Askpass configured for credential handling", sessionId: id, profileId: profileId, component: "SSHSession")
         }
-        proc.environment = env
 
-        // Log sanitized command (no secrets, no key paths)
-        AppLogger.shared.log("SSH: Connecting to \(hostDescription)", sessionId: id, profileId: profileId, component: "SSHSession")
-
-        // Use the slave side of the PTY as stdin/stdout/stderr
-        let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
-        proc.standardInput = slaveHandle
-        proc.standardOutput = slaveHandle
-        proc.standardError = slaveHandle
-
-        proc.terminationHandler = { [weak self] process in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.cancelConnectionTimeout()
-                if self.status != .disconnected {
-                    if process.terminationStatus != 0 && self.status == .connecting {
-                        self.status = .error("Connection failed (exit code \(process.terminationStatus)) — verify credentials and host")
-                    } else {
-                        self.status = .disconnected
-                    }
-                    AppLogger.shared.log("SSH: Process terminated for \(self.host) (exit \(process.terminationStatus))", sessionId: self.id, profileId: self.profileId, component: "SSHSession")
+        // Prepare environment for posix_spawn
+        var cEnv: [UnsafeMutablePointer<CChar>?] = env.map { strdup("\($0.key)=\($0.value)") }
+        cEnv.append(nil)
+        defer {
+            for ptr in cEnv {
+                if let p = ptr {
+                    free(p)
                 }
             }
         }
 
-        do {
-            try proc.run()
-            self.process = proc
+        // Log sanitized command (no secrets, no key paths)
+        AppLogger.shared.log("SSH: Connecting to \(hostDescription)", sessionId: id, profileId: profileId, component: "SSHSession")
+
+        // Set up file actions for posix_spawn
+        var fileActions: posix_spawn_file_actions_t? = nil
+        var spawnRc = posix_spawn_file_actions_init(&fileActions)
+        guard spawnRc == 0 else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.cancelConnectionTimeout()
+                self.status = .error("Failed to initialize process actions")
+                AppLogger.shared.log("SSH: Failed to initialize file actions", level: .error, sessionId: self.id, profileId: self.profileId, component: "SSHSession")
+            }
+            return
+        }
+        defer {
+            posix_spawn_file_actions_destroy(&fileActions)
+        }
+
+        // Map read-end of credential pipe to FD 3
+        if askpassPipeFD[0] >= 0 {
+            posix_spawn_file_actions_adddup2(&fileActions, askpassPipeFD[0], 3)
+        }
+
+        // Map slave terminal FD to stdin (0), stdout (1), stderr (2)
+        if slaveFD >= 0 {
+            posix_spawn_file_actions_adddup2(&fileActions, slaveFD, 0)
+            posix_spawn_file_actions_adddup2(&fileActions, slaveFD, 1)
+            posix_spawn_file_actions_adddup2(&fileActions, slaveFD, 2)
+        }
+
+        // Close the original source FDs in the child after dup2:
+        // - masterFD: the PTY master belongs to the parent only (the child uses slaveFD via 0/1/2)
+        // - askpassPipeFD[0]: already mapped to fd 3 above; closing the original prevents
+        //   the child from holding an extra reference to the pipe read-end beyond fd 3
+        // - slaveFD: already mapped to 0/1/2; the original descriptor is redundant in the child
+        // Without these closes, posix_spawn inherits ALL open FDs into the child, which causes
+        // the fd-count leak observed in C2AuditTests and means ssh gets unexpected extra fds.
+        if masterFD >= 0 {
+            posix_spawn_file_actions_addclose(&fileActions, masterFD)
+        }
+        if askpassPipeFD[0] >= 0 {
+            posix_spawn_file_actions_addclose(&fileActions, askpassPipeFD[0])
+        }
+        if slaveFD >= 0 {
+            posix_spawn_file_actions_addclose(&fileActions, slaveFD)
+        }
+
+        var spawnedPid: pid_t = 0
+        spawnRc = posix_spawn(&spawnedPid, path, &fileActions, nil, cArgs, cEnv)
+
+        if spawnRc == 0 {
+            self.pid = spawnedPid
+
+            // Monitor process termination using DispatchSourceProcess
+            let source = DispatchSource.makeProcessSource(
+                identifier: spawnedPid,
+                eventMask: .exit,
+                queue: DispatchQueue.global(qos: .default)
+            )
+
+            source.setEventHandler { [weak self] in
+                guard let self = self else { return }
+                var status: Int32 = 0
+                _ = waitpid(spawnedPid, &status, 0)
+                let exitCode = self.translateStatus(status)
+
+                DispatchQueue.main.async {
+                    self.cancelConnectionTimeout()
+                    if self.status != .disconnected {
+                        if exitCode != 0 && self.status == .connecting {
+                            self.status = .error("Connection failed (exit code \(exitCode)) — verify credentials and host")
+                        } else {
+                            self.status = .disconnected
+                        }
+                        AppLogger.shared.log("SSH: Process terminated for \(self.host) (exit \(exitCode))", sessionId: self.id, profileId: self.profileId, component: "SSHSession")
+                    }
+                    self.cleanupAllResources()
+                }
+            }
+
+            source.resume()
+            self.processSource = source
+
+            // Close parent's copy of slave FD and pipe read end immediately so that:
+            // 1. PTY master receives EOF correctly when the child exits.
+            // 2. We don't leak resources.
+            if askpassPipeFD[0] >= 0 {
+                close(askpassPipeFD[0])
+                askpassPipeFD[0] = -1
+            }
+            if slaveFD >= 0 {
+                close(slaveFD)
+                slaveFD = -1
+            }
 
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
@@ -268,12 +370,13 @@ final class SSHSession: SessionProtocol {
             }
 
             startReading()
-        } catch {
+        } else {
+            let errorMsg = String(cString: strerror(spawnRc))
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.cancelConnectionTimeout()
-                self.status = .error("Failed to start SSH — \(error.localizedDescription)")
-                AppLogger.shared.log("SSH: Failed to start process: \(error)", level: .error, sessionId: self.id, profileId: self.profileId, component: "SSHSession")
+                self.status = .error("Failed to start SSH — posix_spawn failed: \(errorMsg)")
+                AppLogger.shared.log("SSH: Failed to start process: posix_spawn failed with rc \(spawnRc) (\(errorMsg))", level: .error, sessionId: self.id, profileId: self.profileId, component: "SSHSession")
             }
         }
     }
@@ -316,6 +419,13 @@ final class SSHSession: SessionProtocol {
             }
             close(pipeFDs[1])
             self.askpassPipeFD[1] = -1
+
+            // S-3: Drop the password immediately — it has been written to the pipe
+            // and is no longer needed for the lifetime of the session.
+            // Setting to nil releases the Swift String heap allocation.
+            // Note: Swift does not guarantee zeroing of String storage on dealloc;
+            // this eliminates the reference but not necessarily the backing bytes.
+            self.password = nil
 
             // Script reads from fd 3 which will be the pipe read-end
             scriptContent = """

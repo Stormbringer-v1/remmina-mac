@@ -44,13 +44,7 @@ enum HostnameValidator {
     /// Characters that could enable command injection when hostnames are passed to shell commands
     private static let shellMetacharacters = CharacterSet(charactersIn: ";|&`$(){}!<>\\'\"\n\r\0")
     
-    /// Validate hostname for security risks
-    /// - Parameters:
-    ///   - hostname: The hostname to validate
-    ///   - blockPrivateRanges: If true, also block RFC1918 private addresses
-    /// - Returns: Validated hostname
-    /// - Throws: ValidationError if hostname is unsafe
-    static func validate(_ hostname: String, blockPrivateRanges: Bool = false) throws -> String {
+    static func validate(_ hostname: String, blockPrivateRanges: Bool = false, blockLocalhost: Bool = false) throws -> String {
         let trimmed = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
         
         guard !trimmed.isEmpty else {
@@ -86,8 +80,10 @@ enum HostnameValidator {
         
         // Block localhost variants
         let lowercased = trimmed.lowercased()
-        if lowercased == "localhost" || lowercased == "localhost.localdomain" {
-            throw ValidationError.blockedLocalhost
+        if blockLocalhost {
+            if lowercased == "localhost" || lowercased == "localhost.localdomain" {
+                throw ValidationError.blockedLocalhost
+            }
         }
         // SECURITY: Reject octal/hex/decimal IP notation BEFORE standard parsing.
         // macOS IPv4Address("0177.0.0.1") resolves to 177.0.0.1, but other systems
@@ -97,9 +93,9 @@ enum HostnameValidator {
         
         // Try to parse as IP address
         if let ipAddress = IPv4Address(trimmed) {
-            try validateIPv4(ipAddress, blockPrivateRanges: blockPrivateRanges)
+            try validateIPv4(ipAddress, blockPrivateRanges: blockPrivateRanges, blockLocalhost: blockLocalhost)
         } else if let ipAddress = IPv6Address(trimmed) {
-            try validateIPv6(ipAddress)
+            try validateIPv6(ipAddress, blockLocalhost: blockLocalhost)
         } else {
             // Validate as hostname/FQDN
             try validateHostnameFormat(trimmed)
@@ -107,6 +103,8 @@ enum HostnameValidator {
         
         return trimmed
     }
+    
+
     
     /// Rejects IP addresses written in octal, hexadecimal, or decimal notation
     /// that bypass standard IPv4Address parsing but resolve to dangerous addresses.
@@ -139,7 +137,7 @@ enum HostnameValidator {
         }
     }
     
-    private static func validateIPv4(_ ip: IPv4Address, blockPrivateRanges: Bool) throws {
+    private static func validateIPv4(_ ip: IPv4Address, blockPrivateRanges: Bool, blockLocalhost: Bool) throws {
         let octets = ip.rawValue
         
         // Block 0.0.0.0
@@ -148,7 +146,7 @@ enum HostnameValidator {
         }
         
         // Block 127.0.0.0/8 (loopback)
-        if octets[0] == 127 {
+        if blockLocalhost && octets[0] == 127 {
             throw ValidationError.blockedLoopback
         }
         
@@ -174,9 +172,9 @@ enum HostnameValidator {
         }
     }
     
-    private static func validateIPv6(_ ip: IPv6Address) throws {
+    private static func validateIPv6(_ ip: IPv6Address, blockLocalhost: Bool) throws {
         // Block ::1 (loopback)
-        if ip == IPv6Address.loopback {
+        if blockLocalhost && ip == IPv6Address.loopback {
             throw ValidationError.blockedLoopback
         }
         

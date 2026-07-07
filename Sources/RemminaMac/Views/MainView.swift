@@ -12,10 +12,12 @@ struct MainView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ConnectionManager.self) private var connectionManager
 
-    // Explicit @State array — refreshed via refreshProfiles() after every mutation.
-    // @Query is not used because it does not reliably trigger view invalidation
-    // inside NavigationSplitView on macOS after modelContext.insert().
-    @State private var allProfiles: [ConnectionProfile] = []
+    // @Query is the correct live data source for SwiftData in SwiftUI.
+    // Root cause of previous failures: @Query was added but filteredProfiles still
+    // called profileStore.search()/recents() (manual fetches) instead of filtering
+    // the @Query array in-memory — so the sidebar read stale data even though @Query
+    // had updated. Fix: @Query feeds allProfiles; filteredProfiles filters it in-memory.
+    @Query(sort: \ConnectionProfile.name, order: .forward) private var allProfiles: [ConnectionProfile]
 
     @State private var selectedProfile: ConnectionProfile?
     @State private var searchText = ""
@@ -39,8 +41,19 @@ struct MainView: View {
 
     var body: some View {
         NavigationSplitView {
-            sidebarContent
-                .navigationSplitViewColumnWidth(min: 250, ideal: 280, max: 350)
+            MainSidebarView(
+                profiles: filteredProfiles,
+                selectedProfile: $selectedProfile,
+                filterMode: $filterMode,
+                onConnect: { connectToProfile($0) },
+                onFavorite: { profileStore?.toggleFavorite($0) },
+                onEdit: { profile in
+                    selectedProfile = profile
+                    showingEditProfile = true
+                },
+                onDelete: { requestDelete($0) }
+            )
+            .navigationSplitViewColumnWidth(min: 250, ideal: 280, max: 350)
         } detail: {
             detailContent
         }
@@ -52,7 +65,6 @@ struct MainView: View {
         .searchable(text: $searchText, prompt: "Search profiles (⌘F)")
         .onAppear {
             profileStore = ProfileStore(modelContext: modelContext)
-            refreshProfiles()
             // Auto-connect profiles marked "Connect on open"
             autoConnectOnOpen()
         }
@@ -73,7 +85,6 @@ struct MainView: View {
             ProfileEditView(mode: .create) { profile, password in
                 do {
                     try profileStore?.add(profile)
-                    refreshProfiles()
                     if let password = password, !password.isEmpty {
                         if !KeychainStore.shared.savePassword(password, for: profile.id) {
                             validationError = "Unable to save password to Keychain. Check System Settings → Privacy & Security."
@@ -103,7 +114,6 @@ struct MainView: View {
                     }
                     // password == nil means user didn't touch the password field
                     profileStore?.save()
-                    refreshProfiles()
                 }
             }
         }
@@ -141,34 +151,7 @@ struct MainView: View {
         }
     }
 
-    // MARK: - Sidebar
-
-    private var sidebarContent: some View {
-        VStack(spacing: 0) {
-            // Filter picker
-            Picker("Filter", selection: $filterMode) {
-                ForEach(FilterMode.allCases, id: \.self) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-
-            // Profile list
-            List(filteredProfiles, id: \.id, selection: $selectedProfile) { profile in
-                ProfileRowView(profile: profile)
-                    .tag(profile)
-                    .onTapGesture(count: 2) {
-                        connectToProfile(profile)
-                    }
-                    .contextMenu {
-                        profileContextMenu(for: profile)
-                    }
-            }
-            .listStyle(.sidebar)
-        }
-    }
+    // Removed sidebarContent
 
     // MARK: - Detail
 
@@ -183,32 +166,17 @@ struct MainView: View {
                     onDelete: { requestDelete(profile) }
                 )
             } else {
-                emptyState
+                MainEmptyStateView(
+                    hasNoProfiles: allProfiles.isEmpty,
+                    onNewProfile: { showingNewProfile = true }
+                )
             }
         } else {
             SessionTabView()
         }
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "desktopcomputer")
-                .font(.system(size: 64))
-                .foregroundStyle(.tertiary)
-            Text("No Profile Selected")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-            Text("Select a profile from the sidebar or create a new one")
-                .font(.body)
-                .foregroundStyle(.tertiary)
-            Button("New Profile") {
-                showingNewProfile = true
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
+    // Removed emptyState
 
     // MARK: - Toolbar
 
@@ -252,55 +220,11 @@ struct MainView: View {
         }
     }
 
-    // MARK: - Context Menu
-
-    @ViewBuilder
-    private func profileContextMenu(for profile: ConnectionProfile) -> some View {
-        Button("Connect") {
-            connectToProfile(profile)
-        }
-
-        Divider()
-
-        Button(profile.isFavorite ? "Unfavorite" : "Favorite") {
-            profileStore?.toggleFavorite(profile)
-            refreshProfiles()
-        }
-
-        Button("Copy Host") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(profile.host, forType: .string)
-        }
-
-        if !profile.username.isEmpty {
-            Button("Copy Username") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(profile.username, forType: .string)
-            }
-        }
-
-        Divider()
-
-        Button("Edit…") {
-            selectedProfile = profile
-            showingEditProfile = true
-        }
-
-        Button("Delete", role: .destructive) {
-            requestDelete(profile)
-        }
-    }
+    // Removed profileContextMenu
 
     // MARK: - Helpers
 
-    /// Re-fetch all profiles from the model context into the @State array.
-    /// Called after every mutation to guarantee the sidebar reflects the latest data.
-    private func refreshProfiles() {
-        let descriptor = FetchDescriptor<ConnectionProfile>(
-            sortBy: [SortDescriptor(\.name, order: .forward)]
-        )
-        allProfiles = (try? modelContext.fetch(descriptor)) ?? []
-    }
+
 
     private var filteredProfiles: [ConnectionProfile] {
         var result = allProfiles
@@ -330,7 +254,6 @@ struct MainView: View {
 
     private func connectToProfile(_ profile: ConnectionProfile) {
         profileStore?.markConnected(profile)
-        refreshProfiles()
         connectionManager.openSession(for: profile)
     }
 
@@ -347,7 +270,6 @@ struct MainView: View {
             selectedProfile = nil
         }
         profileStore?.delete(profile)
-        refreshProfiles()
     }
 
     /// Auto-connect profiles marked "Connect on open" at app launch
@@ -397,7 +319,6 @@ struct MainView: View {
                 }
                 
                 if successCount > 0 {
-                    refreshProfiles()
                     importCount = successCount
                     importAlert = true
                 }

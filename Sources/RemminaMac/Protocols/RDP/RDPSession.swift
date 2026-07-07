@@ -24,7 +24,9 @@ final class RDPSession: SessionProtocol {
     private let host: String
     private let port: Int
     private let username: String
-    private let password: String?
+    /// Held only until written to the xfreerdp PTY stdin in startXFreerdp().
+    /// Nilled immediately after the write to minimize in-memory lifetime.
+    private var password: String?
     private let domain: String
 
     private var process: Process?
@@ -229,16 +231,10 @@ final class RDPSession: SessionProtocol {
             args.append("/d:\(domain)")
         }
 
-        // SECURITY: Password is passed via environment variable, NOT as CLI arg.
+        // SECURITY: Password is NOT passed as a CLI arg or environment variable.
         // CLI args are visible in `ps aux` to all users on the system.
-        // xfreerdp reads password from /p: but we use environment to avoid exposure.
-        var env = ProcessInfo.processInfo.environment
-        if let pwd = password, !pwd.isEmpty {
-            // Use /from-stdin approach: write password after process starts
-            // OR pass via environment variable which xfreerdp supports
-            args.append("/p:$REMMINA_RDP_PASS")
-            env["REMMINA_RDP_PASS"] = pwd
-        }
+        // We use the PTY /from-stdin approach: write password after process starts.
+        let env = ProcessInfo.processInfo.environment
 
         // Display settings
         args.append("/size:\(framebufferWidth)x\(framebufferHeight)")
@@ -290,6 +286,10 @@ final class RDPSession: SessionProtocol {
                             _ = Foundation.write(self.masterFD, base, ptr.count)
                         }
                     }
+                    // S-3: Drop the password immediately after writing to PTY.
+                    // Setting to nil releases the Swift String heap allocation.
+                    // Note: Swift does not guarantee zeroing of String storage on dealloc.
+                    self.password = nil
                 }
             }
 

@@ -198,7 +198,7 @@ struct ProfileValidatorTests {
     @Test("Blocked host throws with hostname error")
     func testBlockedHostThrows() {
         #expect(throws: ProfileValidator.ValidationError.self) {
-            try ProfileValidator.validateHost("localhost")
+            try ProfileValidator.validateHost("0.0.0.0")
         }
     }
 }

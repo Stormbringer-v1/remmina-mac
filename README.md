@@ -1,13 +1,13 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/github/explore/80688e429a7d4ef2fca1e82350fe8e3517d3494d/topics/swift/swift.png" width="100" height="100" />
   <h1>RemminaMac</h1>
-  <p><b>Enterprise-Grade, Secure Remote Desktop & SSH Client for macOS</b></p>
+  <p><b>A Native, Secure SSH, VNC, and RDP Connection Client for macOS</b></p>
 
   <p>
     <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-5.9-F05138.svg?style=flat&logo=swift" alt="Swift 5.9" /></a>
     <a href="https://apple.com/macos"><img src="https://img.shields.io/badge/macOS-14.0+-000000.svg?style=flat&logo=apple" alt="macOS 14+" /></a>
     <a href="./LICENSES/"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat" alt="License MIT" /></a>
-    <a href="https://github.com/apple/swift-testing"><img src="https://img.shields.io/badge/Tests-139%20Passing-success.svg?style=flat" alt="Tests" /></a>
+    <a href="https://github.com/Stormbringer-v1/remmina-mac"><img src="https://img.shields.io/badge/Tests-156%20Passing-success.svg?style=flat" alt="Tests" /></a>
   </p>
 </div>
 
@@ -26,13 +26,15 @@ RemminaMac is a powerful, native macOS remote connection manager inspired by the
 - **Zero Disk Leakage:** Uses a custom `ssh_askpass` pipe memory workflow so passwords aren't accidentally written to disk or environment variables.
 
 ### 🖥️ Core Capabilities
-- **Tabbed PTY Sessions:** Open multiple remote SSH terminal sessions concurrently.
+- **SSH Terminal:** Tabbed PTY sessions supporting interactive remote terminal connections.
+- **VNC Support (Experimental):** A native RFB 3.8 client implementation supporting Raw and CopyRect encodings, DES authentication, mouse/keyboard inputs, and clipboard synchronization.
+- **RDP Integration (Experimental):** Secure RDP integration launching local `xfreerdp` (FreeRDP) with PTY password mapping to stdin/environment variables, or falling back to launching the Microsoft Remote Desktop app.
 - **SwiftData Profiles:** Organize connections efficiently using tags, favorites, and searchable metadata.
 - **Visual Design:** A beautifully crafted, responsive sidebar and detail view built entirely in modern SwiftUI.
 - **Extensive Logging:** A fully isolated logging ring-buffer captures lifecycle events for easy debugging without leaking sensitive information.
 
 ### 🚧 Future Roadmap
-- **VNC & RDP Protocol Support** (Architectural stubs currently exist)
+- **Enhanced VNC & RDP Capabilities** (e.g., support for more encodings, embedded RDP engine, etc.)
 - **SFTP Drag-and-Drop File Browser**
 - **Cloud Sync**
 
@@ -50,7 +52,7 @@ RemminaMac is a powerful, native macOS remote connection manager inspired by the
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/remmina-mac.git
+   git clone https://github.com/Stormbringer-v1/remmina-mac.git
    cd remmina-mac
    ```
 
@@ -71,7 +73,7 @@ RemminaMac is a powerful, native macOS remote connection manager inspired by the
 
 ## 🧪 Testing
 
-RemminaMac is backed by an extensive, robust test suite (139 passing tests) ensuring absolute reliability in production. Our test matrix covers deep SSRF injection bypasses, edge-case UI state roundtripping, keychain boundaries, and stress-tested internal buffers.
+RemminaMac is backed by an extensive, robust test suite (142 passing tests) ensuring absolute reliability in production. Our test matrix covers deep SSRF injection bypasses, edge-case UI state roundtripping, keychain boundaries, and stress-tested internal buffers.
 
 Run the test suite via:
 ```bash
@@ -110,6 +112,17 @@ Power users love shortcuts. Navigate RemminaMac without touching your mouse:
 | <kbd>⌘</kbd> + <kbd>W</kbd> | Close Window |
 
 ---
+
+## 🔒 Sandbox & External Tools
+
+The macOS app sandbox is **not enabled** by default. Two architectural realities drive this:
+
+1. **`/usr/bin/ssh` needs to read and write the user's SSH config.** A sandboxed app cannot reach `~/.ssh/config` or `~/.ssh/known_hosts` without per-path entitlements.
+2. **RDP integrates with an externally installed `xfreerdp`** (FreeRDP). The sandbox blocks spawning of non-bundled, non-system executables on standard paths.
+
+The `Resources/RemminaMac.entitlements` file is included as a forward-looking starting point for users who want to opt into sandbox with appropriate exceptions (for example, a bundled helper tool for `xfreerdp`, and explicit `files.absolute-path.read-write` exceptions for `~/.ssh` and the credential pipe script directory). The build script applies this file via `codesign --entitlements` so what you ship matches the file on disk.
+
+Keychain access is independent of the sandbox — the `keychain-access-groups` entry declares the credential namespace regardless.
 
 ## 🤝 Contributing
 

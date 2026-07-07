@@ -49,6 +49,7 @@ struct ProfileEditView: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Close")
             }
             .padding(20)
 
@@ -63,14 +64,17 @@ struct ProfileEditView: View {
                             HStack {
                                 Text("Name")
                                     .frame(width: 80, alignment: .trailing)
+                                    .accessibilityHidden(true)
                                 TextField("My Server", text: $name)
                                     .textFieldStyle(.roundedBorder)
+                                    .accessibilityLabel("Profile Name")
                             }
 
                             HStack {
                                 Text("Protocol")
                                     .frame(width: 80, alignment: .trailing)
-                                Picker("", selection: $protocolType) {
+                                    .accessibilityHidden(true)
+                                Picker("Protocol", selection: $protocolType) {
                                     ForEach(ProtocolType.allCases) { proto in
                                         Label(proto.displayName, systemImage: proto.iconName)
                                             .tag(proto)
@@ -87,15 +91,19 @@ struct ProfileEditView: View {
                             HStack {
                                 Text("Host")
                                     .frame(width: 80, alignment: .trailing)
+                                    .accessibilityHidden(true)
                                 TextField("192.168.1.100 or hostname", text: $host)
                                     .textFieldStyle(.roundedBorder)
+                                    .accessibilityLabel("Host Address")
                             }
 
                             HStack {
                                 Text("Port")
                                     .frame(width: 80, alignment: .trailing)
+                                    .accessibilityHidden(true)
                                 TextField("\(protocolType.defaultPort)", text: $port)
                                     .textFieldStyle(.roundedBorder)
+                                    .accessibilityLabel("Port")
                                     .frame(width: 100)
                                 Spacer()
                             }
@@ -109,15 +117,19 @@ struct ProfileEditView: View {
                             HStack {
                                 Text("Username")
                                     .frame(width: 80, alignment: .trailing)
+                                    .accessibilityHidden(true)
                                 TextField("user", text: $username)
                                     .textFieldStyle(.roundedBorder)
+                                    .accessibilityLabel("Username")
                             }
 
                             HStack {
                                 Text("Password")
                                     .frame(width: 80, alignment: .trailing)
+                                    .accessibilityHidden(true)
                                 SecureField(isEditing ? "Leave blank to keep current" : "Optional", text: $password)
                                     .textFieldStyle(.roundedBorder)
+                                    .accessibilityLabel("Password")
                                     .onChange(of: password) { _, _ in
                                         passwordDirty = true
                                     }
@@ -127,8 +139,10 @@ struct ProfileEditView: View {
                                 HStack {
                                     Text("Domain")
                                         .frame(width: 80, alignment: .trailing)
+                                        .accessibilityHidden(true)
                                     TextField("Optional", text: $domain)
                                         .textFieldStyle(.roundedBorder)
+                                        .accessibilityLabel("Domain")
                                 }
                             }
 
@@ -164,6 +178,7 @@ struct ProfileEditView: View {
                                             }
                                             .buttonStyle(.plain)
                                             .help("Clear key and use SSH agent")
+                                            .accessibilityLabel("Clear SSH Key")
                                         }
                                     }
 
@@ -185,8 +200,10 @@ struct ProfileEditView: View {
                             HStack {
                                 Text("Tags")
                                     .frame(width: 80, alignment: .trailing)
+                                    .accessibilityHidden(true)
                                 TextField("web, production, staging (comma-separated)", text: $tagsText)
                                     .textFieldStyle(.roundedBorder)
+                                    .accessibilityLabel("Tags")
                             }
 
                             HStack {
@@ -211,6 +228,7 @@ struct ProfileEditView: View {
                             .frame(minHeight: 60, maxHeight: 120)
                             .scrollContentBackground(.hidden)
                             .padding(4)
+                            .accessibilityLabel("Notes")
                     }
                 }
                 .padding(20)

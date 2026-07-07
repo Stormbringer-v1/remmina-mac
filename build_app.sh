@@ -94,7 +94,11 @@ echo ""
 
 # Step 5: Code sign (ad-hoc for local use)
 echo "🔏 Step 5/5: Code signing (ad-hoc)..."
-codesign --force --deep --sign - "$BUNDLE_DIR" 2>&1 || {
+SIGN_FLAGS=(--force --deep --sign -)
+if [ -f "$RESOURCES_DIR/RemminaMac.entitlements" ]; then
+    SIGN_FLAGS+=(--entitlements "$RESOURCES_DIR/RemminaMac.entitlements")
+fi
+codesign "${SIGN_FLAGS[@]}" "$BUNDLE_DIR" 2>&1 || {
     echo "⚠️  Code signing failed (app will still work locally)"
 }
 echo "✅ Code signed"

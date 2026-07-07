@@ -36,35 +36,41 @@ struct HostnameValidatorTests {
     @Test("Block localhost")
     func testBlockLocalhost() {
         #expect(throws: HostnameValidator.ValidationError.blockedLocalhost) {
-            try HostnameValidator.validate("localhost")
+            try HostnameValidator.validate("localhost", blockLocalhost: true)
         }
     }
     
     @Test("Block localhost case insensitive")
     func testBlockLocalhostCaseInsensitive() {
         #expect(throws: HostnameValidator.ValidationError.blockedLocalhost) {
-            try HostnameValidator.validate("LOCALHOST")
+            try HostnameValidator.validate("LOCALHOST", blockLocalhost: true)
         }
     }
     
     @Test("Block 127.0.0.1")
     func testBlockLoopback127001() {
         #expect(throws: HostnameValidator.ValidationError.blockedLoopback) {
-            try HostnameValidator.validate("127.0.0.1")
+            try HostnameValidator.validate("127.0.0.1", blockLocalhost: true)
         }
+    }
+    
+    @Test("Allow 127.0.0.1 by default")
+    func testAllowLoopback127001ByDefault() throws {
+        let result = try HostnameValidator.validate("127.0.0.1")
+        #expect(result == "127.0.0.1")
     }
     
     @Test("Block 127.0.0.0/8 range")
     func testBlockLoopback127Range() {
         #expect(throws: HostnameValidator.ValidationError.blockedLoopback) {
-            try HostnameValidator.validate("127.1.2.3")
+            try HostnameValidator.validate("127.1.2.3", blockLocalhost: true)
         }
     }
     
     @Test("Block IPv6 loopback ::1")
     func testBlockIPv6Loopback() {
         #expect(throws: HostnameValidator.ValidationError.blockedLoopback) {
-            try HostnameValidator.validate("::1")
+            try HostnameValidator.validate("::1", blockLocalhost: true)
         }
     }
     

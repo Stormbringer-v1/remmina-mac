@@ -386,4 +386,270 @@ struct SecurityTests {
         profile.protocolRawValue = "TELNET" // Invalid
         #expect(profile.protocolType == .ssh) // Should default
     }
+    
+    // MARK: - SSH Askpass Pipe FD 3 Bug Proof
+    
+    @Test("Prove askpass pipe fd 3 bug by showing fd 3 is not inherited/mapped")
+    func testAskpassPipeFD3Bug() throws {
+        // Replicate openpty setup
+        var master: Int32 = -1
+        var slave: Int32 = -1
+        let rc = openpty(&master, &slave, nil, nil, nil)
+        #expect(rc == 0)
+        
+        defer {
+            if master >= 0 { close(master) }
+            if slave >= 0 { close(slave) }
+        }
+        
+        // Replicate pipe setup
+        var pipeFDs: [Int32] = [-1, -1]
+        let pipeRc = pipe(&pipeFDs)
+        #expect(pipeRc == 0)
+        
+        defer {
+            if pipeFDs[0] >= 0 { close(pipeFDs[0]) }
+            if pipeFDs[1] >= 0 { close(pipeFDs[1]) }
+        }
+        
+        // Write a test password to the pipe
+        let password = "SecretTestPassword123"
+        let pwdData = Data(password.utf8)
+        pwdData.withUnsafeBytes { ptr in
+            if let base = ptr.baseAddress {
+                _ = Foundation.write(pipeFDs[1], base, ptr.count)
+            }
+        }
+        // Close write end of the pipe immediately after writing, as in SSHSession
+        close(pipeFDs[1])
+        pipeFDs[1] = -1
+        
+        // Create temporary askpass-like script that attempts to read from fd 3
+        let tmpDir = FileManager.default.temporaryDirectory
+        let scriptPath = tmpDir.appendingPathComponent("test_askpass_\(UUID().uuidString).sh").path
+        
+        let scriptContent = """
+        #!/bin/bash
+        cat <&3 2>&1
+        """
+        
+        let attrs: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
+        let created = FileManager.default.createFile(
+            atPath: scriptPath,
+            contents: scriptContent.data(using: .utf8),
+            attributes: attrs
+        )
+        #expect(created)
+        
+        defer {
+            try? FileManager.default.removeItem(atPath: scriptPath)
+        }
+        
+        // Replicate Process setup from SSHSession
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = [scriptPath]
+        
+        var env = ProcessInfo.processInfo.environment
+        env["TERM"] = "xterm-256color"
+        proc.environment = env
+        
+        let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
+        proc.standardInput = slaveHandle
+        proc.standardOutput = slaveHandle
+        proc.standardError = slaveHandle
+        
+        // Run the process
+        try proc.run()
+        
+        // Read output from PTY master
+        var outputData = Data()
+        let start = Date()
+        
+        // Set the master descriptor to non-blocking so we can read without hanging forever
+        let flags = fcntl(master, F_GETFL)
+        _ = fcntl(master, F_SETFL, flags | O_NONBLOCK)
+        
+        // Read until EOF or timeout
+        while Date().timeIntervalSince(start) < 2.0 {
+            var buffer = [UInt8](repeating: 0, count: 1024)
+            let bytesRead = read(master, &buffer, buffer.count)
+            if bytesRead > 0 {
+                outputData.append(buffer, count: bytesRead)
+            } else if bytesRead < 0 {
+                let err = errno
+                if err == EAGAIN || err == EWOULDBLOCK || err == EINTR {
+                    Thread.sleep(forTimeInterval: 0.05)
+                    continue
+                }
+                break
+            } else {
+                // bytesRead == 0 (EOF)
+                break
+            }
+        }
+        
+        proc.terminate()
+        proc.waitUntilExit()
+        
+        let outputString = String(data: outputData, encoding: .utf8) ?? ""
+        
+        // Verify that the output does NOT contain the password (proving the bug)
+        // It will contain something like "test_askpass_*.sh: line 2: 3: Bad file descriptor" or empty
+        #expect(!outputString.contains(password), "Expected password not to be read from fd 3")
+        #expect(outputString.contains("Bad file descriptor") || outputString.isEmpty, "Expected fd 3 to be closed or invalid, output was: \(outputString)")
+    }
+    
+    @Test("Verify askpass pipe fd 3 is successfully inherited/mapped when using posix_spawn")
+    func testAskpassPipeFD3Fixed() throws {
+        // Replicate openpty setup
+        var master: Int32 = -1
+        var slave: Int32 = -1
+        let rc = openpty(&master, &slave, nil, nil, nil)
+        #expect(rc == 0)
+        
+        defer {
+            if master >= 0 { close(master) }
+            if slave >= 0 { close(slave) }
+        }
+        
+        // Replicate pipe setup
+        var pipeFDs: [Int32] = [-1, -1]
+        let pipeRc = pipe(&pipeFDs)
+        #expect(pipeRc == 0)
+        
+        defer {
+            if pipeFDs[0] >= 0 { close(pipeFDs[0]) }
+            if pipeFDs[1] >= 0 { close(pipeFDs[1]) }
+        }
+        
+        // Write a test password to the pipe
+        let password = "SecretTestPassword123"
+        let pwdData = Data(password.utf8)
+        pwdData.withUnsafeBytes { ptr in
+            if let base = ptr.baseAddress {
+                _ = Foundation.write(pipeFDs[1], base, ptr.count)
+            }
+        }
+        // Close write end of the pipe immediately after writing
+        close(pipeFDs[1])
+        pipeFDs[1] = -1
+        
+        // Create temporary askpass-like script that attempts to read from fd 3
+        let tmpDir = FileManager.default.temporaryDirectory
+        let scriptPath = tmpDir.appendingPathComponent("test_askpass_fixed_\(UUID().uuidString).sh").path
+        
+        let scriptContent = """
+        #!/bin/bash
+        cat <&3 2>&1
+        """
+        
+        let attrs: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
+        let created = FileManager.default.createFile(
+            atPath: scriptPath,
+            contents: scriptContent.data(using: .utf8),
+            attributes: attrs
+        )
+        #expect(created)
+        
+        defer {
+            try? FileManager.default.removeItem(atPath: scriptPath)
+        }
+        
+        // Replicate posix_spawn setup from SSHSession
+        let path = "/bin/bash"
+        let args = [path, scriptPath]
+        var cArgs = args.map { strdup($0) }
+        cArgs.append(nil)
+        defer {
+            for ptr in cArgs {
+                if let p = ptr {
+                    free(p)
+                }
+            }
+        }
+        
+        var env = ProcessInfo.processInfo.environment
+        env["TERM"] = "xterm-256color"
+        var cEnv = env.map { strdup("\($0.key)=\($0.value)") }
+        cEnv.append(nil)
+        defer {
+            for ptr in cEnv {
+                if let p = ptr {
+                    free(p)
+                }
+            }
+        }
+        
+        var fileActions: posix_spawn_file_actions_t? = nil
+        var spawnRc = posix_spawn_file_actions_init(&fileActions)
+        #expect(spawnRc == 0)
+        defer {
+            posix_spawn_file_actions_destroy(&fileActions)
+        }
+        
+        // Map read-end of credential pipe to FD 3
+        if pipeFDs[0] >= 0 {
+            posix_spawn_file_actions_adddup2(&fileActions, pipeFDs[0], 3)
+        }
+        
+        // Map slave terminal FD to stdin (0), stdout (1), stderr (2)
+        if slave >= 0 {
+            posix_spawn_file_actions_adddup2(&fileActions, slave, 0)
+            posix_spawn_file_actions_adddup2(&fileActions, slave, 1)
+            posix_spawn_file_actions_adddup2(&fileActions, slave, 2)
+        }
+        
+        var spawnedPid: pid_t = 0
+        spawnRc = posix_spawn(&spawnedPid, path, &fileActions, nil, cArgs, cEnv)
+        #expect(spawnRc == 0)
+        
+        // Close parent copies of pipe read end and slave FD
+        if pipeFDs[0] >= 0 {
+            close(pipeFDs[0])
+            pipeFDs[0] = -1
+        }
+        if slave >= 0 {
+            close(slave)
+            slave = -1
+        }
+        
+        // Read output from PTY master
+        var outputData = Data()
+        let start = Date()
+        
+        // Set the master descriptor to non-blocking so we can read without hanging forever
+        let flags = fcntl(master, F_GETFL)
+        _ = fcntl(master, F_SETFL, flags | O_NONBLOCK)
+        
+        // Read until EOF or timeout
+        while Date().timeIntervalSince(start) < 2.0 {
+            var buffer = [UInt8](repeating: 0, count: 1024)
+            let bytesRead = read(master, &buffer, buffer.count)
+            if bytesRead > 0 {
+                outputData.append(buffer, count: bytesRead)
+            } else if bytesRead < 0 {
+                let err = errno
+                if err == EAGAIN || err == EWOULDBLOCK || err == EINTR {
+                    Thread.sleep(forTimeInterval: 0.05)
+                    continue
+                }
+                break
+            } else {
+                // bytesRead == 0 (EOF)
+                break
+            }
+        }
+        
+        // Kill if still running and reap
+        kill(spawnedPid, SIGKILL)
+        var status: Int32 = 0
+        _ = waitpid(spawnedPid, &status, 0)
+        
+        let outputString = String(data: outputData, encoding: .utf8) ?? ""
+        
+        // Verify that the output DOES contain the password (proving the fix works!)
+        #expect(outputString.contains(password), "Expected password to be read from fd 3. Output was: \(outputString)")
+        #expect(!outputString.contains("Bad file descriptor"), "Expected no Bad file descriptor error. Output was: \(outputString)")
+    }
 }
