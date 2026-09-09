@@ -55,9 +55,53 @@ struct ProfileImportExport {
         let sshKeyPath: String?
         
         // Strict decoding - reject unknown fields
-        enum CodingKeys: String, CodingKey {
+        enum CodingKeys: String, CodingKey, CaseIterable {
             case name, protocolType, host, port, username, domain
             case notes, tags, isFavorite, connectOnOpen, sshKeyPath
+        }
+
+        private struct AnyCodingKey: CodingKey {
+            var stringValue: String
+            var intValue: Int?
+
+            init?(stringValue: String) {
+                self.stringValue = stringValue
+                self.intValue = nil
+            }
+
+            init?(intValue: Int) {
+                self.stringValue = "\(intValue)"
+                self.intValue = intValue
+            }
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+
+            let rawContainer = try decoder.container(keyedBy: AnyCodingKey.self)
+            let knownKeys = Set(CodingKeys.allCases.map(\.stringValue))
+            for key in rawContainer.allKeys {
+                if !knownKeys.contains(key.stringValue) {
+                    throw DecodingError.dataCorrupted(
+                        DecodingError.Context(
+                            codingPath: decoder.codingPath,
+                            debugDescription: "Unknown key '\(key.stringValue)' not allowed"
+                        )
+                    )
+                }
+            }
+
+            self.name = try container.decode(String.self, forKey: .name)
+            self.protocolType = try container.decode(String.self, forKey: .protocolType)
+            self.host = try container.decode(String.self, forKey: .host)
+            self.port = try container.decode(Int.self, forKey: .port)
+            self.username = try container.decode(String.self, forKey: .username)
+            self.domain = try container.decode(String.self, forKey: .domain)
+            self.notes = try container.decode(String.self, forKey: .notes)
+            self.tags = try container.decode([String].self, forKey: .tags)
+            self.isFavorite = try container.decode(Bool.self, forKey: .isFavorite)
+            self.connectOnOpen = try container.decode(Bool.self, forKey: .connectOnOpen)
+            self.sshKeyPath = try container.decodeIfPresent(String.self, forKey: .sshKeyPath)
         }
 
         init(from profile: ConnectionProfile) {
@@ -118,14 +162,12 @@ struct ProfileImportExport {
                 throw ImportError.invalidProfileData(index: index, reason: "Notes too long (max 1000 chars)")
             }
             
-            // Validate tags (max 10 tags, max 50 chars each)
-            guard tags.count <= 10 else {
-                throw ImportError.invalidProfileData(index: index, reason: "Too many tags (max 10)")
-            }
-            for tag in tags {
-                guard tag.count <= 50 else {
-                    throw ImportError.invalidProfileData(index: index, reason: "Tag too long (max 50 chars)")
-                }
+            // Validate tags (max 10 tags, max 50 chars each, no commas, no control chars)
+            let validatedTags: [String]
+            do {
+                validatedTags = try ProfileValidator.validateTags(tags)
+            } catch let error as ProfileValidator.ValidationError {
+                throw ImportError.invalidProfileData(index: index, reason: error.localizedDescription)
             }
             
             let proto = ProtocolType(rawValue: protocolType) ?? .ssh
@@ -137,7 +179,7 @@ struct ProfileImportExport {
                 username: username,
                 domain: domain,
                 notes: notes,
-                tags: tags,
+                tags: validatedTags,
                 isFavorite: isFavorite,
                 connectOnOpen: connectOnOpen,
                 sshKeyPath: sshKeyPath ?? ""

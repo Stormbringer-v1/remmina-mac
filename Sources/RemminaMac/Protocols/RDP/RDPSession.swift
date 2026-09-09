@@ -1,10 +1,21 @@
 import Foundation
 import AppKit
 
-/// RDP session using xfreerdp (FreeRDP) or Microsoft Remote Desktop URL scheme.
+/// RDP session that runs a local `xfreerdp` (FreeRDP) on a pseudo-terminal, or
+/// hands off to the Microsoft Remote Desktop URL scheme when xfreerdp is absent.
 ///
-/// Security: Password is passed to xfreerdp via the /from-stdin flag or
-/// environment variable, never as a CLI argument visible in `ps aux`.
+/// Security: the password is never a CLI argument (invisible in `ps aux`). Like
+/// the SSH session, xfreerdp is given the PTY slave as its controlling terminal
+/// (see `PTYProcess`) so its `Password:` prompt appears on the terminal; we
+/// detect the prompt and write the password to the PTY in-memory, once.
+///
+/// Status handling: the session is promoted to `.connected` either when the
+/// password prompt is answered or, after a short grace window, if the process is
+/// still running. It is NOT marked connected merely because the process started
+/// — that masked authentication failures.
+///
+/// Note: this path depends on a locally installed FreeRDP and has not been
+/// verified end-to-end against a live RDP host in this workspace.
 final class RDPSession: SessionProtocol {
     let id = UUID()
     let profileId: UUID
@@ -24,28 +35,23 @@ final class RDPSession: SessionProtocol {
     private let host: String
     private let port: Int
     private let username: String
-    /// Held only until written to the xfreerdp PTY stdin in startXFreerdp().
-    /// Nilled immediately after the write to minimize in-memory lifetime.
+    /// Held until written to the PTY in response to xfreerdp's password prompt,
+    /// then nilled.
     private var password: String?
     private let domain: String
 
-    private var process: Process?
-    private var masterFD: Int32 = -1
-    private var slaveFD: Int32 = -1
+    private let pty = PTYProcess()
     private var readSource: DispatchSourceRead?
     private var timeoutWorkItem: DispatchWorkItem?
-    private var isRunning = false
+    private var connectedWorkItem: DispatchWorkItem?
+    private var passwordDelivered = false
+    private var promptBuffer = Data()
+    private static let maxPromptBufferBytes = 4096
 
-    // Framebuffer for embedded mode
-    private(set) var framebufferWidth: Int = 1280
-    private(set) var framebufferHeight: Int = 800
-    private var framebuffer: [UInt8] = []
-
-    var onFramebufferUpdate: ((NSImage) -> Void)?
     var onOutputReceived: ((String) -> Void)?
 
-    /// Connection timeout in seconds
     private static let connectionTimeoutSeconds: Double = 15
+    private static let postSpawnGraceSeconds: Double = 1.5
 
     init(profile: ConnectionProfile, password: String? = nil) {
         self.profileId = profile.id
@@ -65,11 +71,14 @@ final class RDPSession: SessionProtocol {
         guard !status.isActive else { return }
         status = .connecting
         AppLogger.shared.log("RDP: Connecting to \(host):\(port)")
-
         startConnectionTimeout()
-
+        let (ignoreCert, clipboard): (Bool, Bool) = MainActor.assumeIsolated {
+            let cert = SecuritySettings.shared.rdpIgnoreCertificate
+            let clip = SecuritySettings.shared.allowRemoteClipboard || SecuritySettings.shared.sendLocalClipboard
+            return (cert, clip)
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.startRDPConnection()
+            self?.startRDPConnection(ignoreCert: ignoreCert, clipboard: clipboard)
         }
     }
 
@@ -89,19 +98,10 @@ final class RDPSession: SessionProtocol {
     }
 
     func sendInput(_ data: Data) {
-        guard masterFD >= 0 else { return }
-        data.withUnsafeBytes { ptr in
-            if let baseAddress = ptr.baseAddress {
-                let _ = write(masterFD, baseAddress, ptr.count)
-            }
-        }
+        pty.write(data)
     }
 
-    func sendCtrlAltDel() {
-        AppLogger.shared.log("RDP: Sending Ctrl+Alt+Del")
-    }
-
-    // MARK: - Connection Timeout
+    // MARK: - Timers
 
     private func startConnectionTimeout() {
         timeoutWorkItem?.cancel()
@@ -124,39 +124,67 @@ final class RDPSession: SessionProtocol {
         timeoutWorkItem = nil
     }
 
-    // MARK: - Resource Cleanup
+    /// Promote to `.connected` if still connecting after the grace window. This
+    /// is what lets a key-based or otherwise prompt-less xfreerdp session be
+    /// reported as connected instead of being killed by the 15s timeout.
+    private func schedulePostSpawnGrace() {
+        connectedWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                guard self.status == .connecting else { return }
+                self.cancelConnectionTimeout()
+                self.status = .connected
+                AppLogger.shared.log("RDP: xfreerdp running for \(self.host)")
+            }
+        }
+        connectedWorkItem = work
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + RDPSession.postSpawnGraceSeconds, execute: work)
+    }
+
+    // MARK: - Cleanup
 
     private func cleanupAllResources() {
         cancelConnectionTimeout()
-        isRunning = false
-
+        connectedWorkItem?.cancel()
+        connectedWorkItem = nil
         readSource?.cancel()
         readSource = nil
-
-        if let process = process, process.isRunning {
-            process.terminate()
-        }
-        process = nil
-
-        if masterFD >= 0 { close(masterFD); masterFD = -1 }
-        if slaveFD >= 0 { close(slaveFD); slaveFD = -1 }
+        pty.terminate()
+        pty.closeMaster()
     }
 
-    // MARK: - Connection Strategy
+    // MARK: - Connection strategy
 
-    private func startRDPConnection() {
-        // Strategy 1: Try xfreerdp (FreeRDP CLI)
+    /// Pure argv builder for xfreerdp (PROBLEMS.md ISSUE-004, ISSUE-019).
+    static func buildArguments(
+        host: String,
+        port: Int,
+        username: String = "",
+        domain: String = "",
+        size: (width: Int, height: Int) = (1280, 800),
+        ignoreCert: Bool = false,
+        clipboard: Bool = false
+    ) -> [String] {
+        var args: [String] = ["/v:\(host):\(port)"]
+        if !username.isEmpty { args.append("/u:\(username)") }
+        if !domain.isEmpty { args.append("/d:\(domain)") }
+        args.append("/size:\(size.width)x\(size.height)")
+        args.append("/bpp:32")
+        args.append(clipboard ? "+clipboard" : "-clipboard")
+        args.append(ignoreCert ? "/cert:ignore" : "/cert:tofu")
+        args.append("/log-level:WARN")
+        return args
+    }
+
+    private func startRDPConnection(ignoreCert: Bool, clipboard: Bool) {
         if let xfreerdpPath = findXFreerdp() {
-            startXFreerdp(path: xfreerdpPath)
+            startXFreerdp(path: xfreerdpPath, ignoreCert: ignoreCert, clipboard: clipboard)
             return
         }
-
-        // Strategy 2: Try Microsoft Remote Desktop URL scheme
         if tryMicrosoftRemoteDesktop() {
             return
         }
-
-        // Strategy 3: Actionable error guidance
         DispatchQueue.main.async { [weak self] in
             self?.cancelConnectionTimeout()
             self?.status = .error("No RDP client found — install FreeRDP: brew install freerdp")
@@ -164,31 +192,24 @@ final class RDPSession: SessionProtocol {
         }
     }
 
-    // MARK: - xfreerdp
-
     private func findXFreerdp() -> String? {
         let paths = [
-            "/opt/homebrew/bin/xfreerdp",      // ARM Homebrew
-            "/opt/homebrew/bin/xfreerdp3",     // FreeRDP 3.x
-            "/usr/local/bin/xfreerdp",          // Intel Homebrew
+            "/opt/homebrew/bin/xfreerdp",
+            "/opt/homebrew/bin/xfreerdp3",
+            "/usr/local/bin/xfreerdp",
             "/usr/local/bin/xfreerdp3",
         ]
-
-        for path in paths {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                AppLogger.shared.log("RDP: Found xfreerdp at \(path)")
-                return path
-            }
+        for path in paths where FileManager.default.isExecutableFile(atPath: path) {
+            AppLogger.shared.log("RDP: Found xfreerdp at \(path)")
+            return path
         }
 
-        // Try which
         let whichProc = Process()
         whichProc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         whichProc.arguments = ["xfreerdp"]
         let pipe = Pipe()
         whichProc.standardOutput = pipe
         whichProc.standardError = FileHandle.nullDevice
-
         do {
             try whichProc.run()
             whichProc.waitUntilExit()
@@ -198,129 +219,75 @@ final class RDPSession: SessionProtocol {
                 return path
             }
         } catch {}
-
         return nil
     }
 
-    private func startXFreerdp(path: String) {
-        var master: Int32 = -1
-        var slave: Int32 = -1
-
-        let rc = openpty(&master, &slave, nil, nil, nil)
-        guard rc == 0 else {
-            DispatchQueue.main.async { [weak self] in
-                self?.cancelConnectionTimeout()
-                self?.status = .error("Failed to allocate terminal — system resources may be exhausted")
-            }
-            return
+    private func startXFreerdp(path: String, ignoreCert: Bool, clipboard: Bool) {
+        if ignoreCert {
+            AppLogger.shared.log("RDP: Launching with certificate verification disabled (/cert:ignore)", level: .warning)
         }
 
-        self.masterFD = master
-        self.slaveFD = slave
+        let args = Self.buildArguments(
+            host: host,
+            port: port,
+            username: username,
+            domain: domain,
+            size: (1280, 800),
+            ignoreCert: ignoreCert,
+            clipboard: clipboard
+        )
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: path)
+        var env = ProcessInfo.processInfo.environment
+        env["TERM"] = "xterm-256color"
 
-        var args: [String] = []
-        args.append("/v:\(host):\(port)")
-
-        if !username.isEmpty {
-            args.append("/u:\(username)")
-        }
-        if !domain.isEmpty {
-            args.append("/d:\(domain)")
-        }
-
-        // SECURITY: Password is NOT passed as a CLI arg or environment variable.
-        // CLI args are visible in `ps aux` to all users on the system.
-        // We use the PTY /from-stdin approach: write password after process starts.
-        let env = ProcessInfo.processInfo.environment
-
-        // Display settings
-        args.append("/size:\(framebufferWidth)x\(framebufferHeight)")
-        args.append("/bpp:32")
-        args.append("+clipboard")
-        args.append("/cert:ignore")
-        args.append("/log-level:WARN")
-
-        proc.arguments = args
-        proc.environment = env
-
-        let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
-        proc.standardInput = slaveHandle
-        proc.standardOutput = slaveHandle
-        proc.standardError = slaveHandle
-
-        proc.terminationHandler = { [weak self] process in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.cancelConnectionTimeout()
-                if self.status != .disconnected {
-                    if process.terminationStatus != 0 {
-                        self.status = .error("RDP connection failed (exit \(process.terminationStatus)) — verify credentials and host")
-                    } else {
-                        self.status = .disconnected
-                    }
-                    AppLogger.shared.log("RDP: xfreerdp terminated (exit code: \(process.terminationStatus))")
-                }
-            }
-        }
-
-        // Log WITHOUT credentials
         AppLogger.shared.log("RDP: Starting xfreerdp for \(host):\(port)")
 
         do {
-            try proc.run()
-            self.process = proc
-            self.isRunning = true
-
-            // If password provided, write it to stdin for xfreerdp
-            // This is the secondary secure channel — stdin is not visible in ps
-            if let pwd = password, !pwd.isEmpty {
-                // Write password to xfreerdp via PTY (it prompts for it)
-                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                    guard let self = self, self.masterFD >= 0 else { return }
-                    let pwdData = Data((pwd + "\n").utf8)
-                    pwdData.withUnsafeBytes { ptr in
-                        if let base = ptr.baseAddress {
-                            _ = Foundation.write(self.masterFD, base, ptr.count)
-                        }
-                    }
-                    // S-3: Drop the password immediately after writing to PTY.
-                    // Setting to nil releases the Swift String heap allocation.
-                    // Note: Swift does not guarantee zeroing of String storage on dealloc.
-                    self.password = nil
-                }
-            }
-
-            DispatchQueue.main.async { [weak self] in
-                self?.cancelConnectionTimeout()
-                self?.status = .connected
-                AppLogger.shared.log("RDP: xfreerdp started for \(self?.host ?? "")")
-            }
-
-            startReading()
+            try pty.launch(path: path, args: args, env: env, onExit: { [weak self] code in
+                self?.handleProcessExit(code)
+            })
         } catch {
             DispatchQueue.main.async { [weak self] in
                 self?.cancelConnectionTimeout()
                 self?.status = .error("Failed to start xfreerdp — \(error.localizedDescription)")
-                AppLogger.shared.log("RDP: Failed to start xfreerdp: \(error)", level: .error)
+                AppLogger.shared.log("RDP: Failed to start xfreerdp: \(error.localizedDescription)", level: .error)
             }
+            return
         }
+
+        startReading()
+        schedulePostSpawnGrace()
+    }
+
+    /// Invoked on the main queue when xfreerdp exits (already reaped).
+    private func handleProcessExit(_ exitCode: Int32) {
+        cancelConnectionTimeout()
+        connectedWorkItem?.cancel()
+        if status != .disconnected {
+            if exitCode != 0 && status == .connecting {
+                status = .error("xfreerdp exited with code \(exitCode) before authenticating — verify credentials, host, and FreeRDP installation")
+            } else if exitCode != 0 {
+                status = .error("RDP session ended (exit code \(exitCode))")
+            } else {
+                status = .disconnected
+            }
+            AppLogger.shared.log("RDP: xfreerdp terminated (exit code: \(exitCode))")
+        }
+        readSource?.cancel()
+        readSource = nil
+        pty.closeMaster()
     }
 
     private func startReading() {
-        let source = DispatchSource.makeReadSource(
-            fileDescriptor: masterFD,
-            queue: DispatchQueue.global(qos: .userInteractive)
-        )
-
+        let fd = pty.masterFD
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: DispatchQueue.global(qos: .userInteractive))
         source.setEventHandler { [weak self] in
-            guard let self = self, self.masterFD >= 0 else { return }
-
+            guard let self = self else { return }
+            let fd = self.pty.masterFD
+            guard fd >= 0 else { return }
             var buffer = [UInt8](repeating: 0, count: 8192)
-            let bytesRead = read(self.masterFD, &buffer, buffer.count)
-
+            let bytesRead = read(fd, &buffer, buffer.count)
             if bytesRead > 0 {
                 let data = Data(buffer[0..<bytesRead])
                 if let text = String(data: data, encoding: .utf8) {
@@ -328,6 +295,7 @@ final class RDPSession: SessionProtocol {
                         self.onOutputReceived?(text)
                     }
                 }
+                self.handlePossiblePasswordPrompt(in: data)
             } else if bytesRead <= 0 {
                 DispatchQueue.main.async {
                     if self.status == .connected {
@@ -336,31 +304,56 @@ final class RDPSession: SessionProtocol {
                 }
             }
         }
-
-        source.setCancelHandler { [weak self] in
-            _ = self
-        }
-
         source.resume()
-        self.readSource = source
+        readSource = source
     }
 
-    // MARK: - Microsoft Remote Desktop
+    /// Detects xfreerdp's password prompt and writes the stored password once.
+    /// Runs only on the read source's queue.
+    private func handlePossiblePasswordPrompt(in chunk: Data) {
+        guard !passwordDelivered else { return }
+        guard let pwd = password, !pwd.isEmpty else { return }
+
+        promptBuffer.append(chunk)
+        if promptBuffer.count > RDPSession.maxPromptBufferBytes {
+            promptBuffer.removeFirst(promptBuffer.count - RDPSession.maxPromptBufferBytes)
+        }
+
+        guard let window = String(data: promptBuffer, encoding: .utf8) else { return }
+        let lower = window.lowercased()
+        if lower.contains("password:") || lower.contains("password for") {
+            passwordDelivered = true
+            _ = pty.write(Data((pwd + "\n").utf8))
+            password = nil
+            promptBuffer.removeAll(keepingCapacity: false)
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                if self.status == .connecting {
+                    self.cancelConnectionTimeout()
+                    self.status = .connected
+                    AppLogger.shared.log("RDP: xfreerdp authenticated for \(self.host)")
+                }
+            }
+        }
+    }
+
+    // MARK: - Microsoft Remote Desktop fallback
 
     private func tryMicrosoftRemoteDesktop() -> Bool {
         let msrdURL = "rdp://full%20address=s:\(host):\(port)"
         guard let url = URL(string: msrdURL) else { return false }
 
         if NSWorkspace.shared.urlForApplication(toOpen: url) != nil {
+            // Handing off to the external app; we can no longer observe status,
+            // so report `.disconnected` rather than a false `.connected`.
             DispatchQueue.main.async { [weak self] in
                 self?.cancelConnectionTimeout()
                 NSWorkspace.shared.open(url)
-                self?.status = .connected
-                AppLogger.shared.log("RDP: Opened via Microsoft Remote Desktop")
+                self?.status = .disconnected
+                AppLogger.shared.log("RDP: Handed off to Microsoft Remote Desktop (status no longer observable in-app)")
             }
             return true
         }
-
         return false
     }
 }

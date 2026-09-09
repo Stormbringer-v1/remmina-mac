@@ -15,20 +15,23 @@
 
 RemminaMac is a powerful, native macOS remote connection manager inspired by the popular Linux tool [Remmina](https://remmina.org/). Built fully in **SwiftUI**, **SwiftData**, and leveraging the **macOS Keychain**, it provides a stunning, secure, and blazing-fast interface for managing remote connections.
 
+> **Note:** RemminaMac is an independent project and is **not** affiliated with, sponsored by, or endorsed by the Remmina project. The name reflects shared inspiration only.
+
 ---
 
 ## ✨ Features
 
 ### 🛡️ Secure by Design
-- **Keychain Integration:** All passwords are encrypted and stored in the native macOS Keychain (`kSecClassGenericPassword`). No plain-text secrets. ever.
-- **SSRF Mitigation:** Advanced network edge-case validation prevents Server-Side Request Forgery by blocking local loopback, cloud metadata (169.254.x.x), and private IP scans.
-- **Strict Input Validation:** Command injection protections against shell metacharacters and directory traversal checks on SSH keys.
-- **Zero Disk Leakage:** Uses a custom `ssh_askpass` pipe memory workflow so passwords aren't accidentally written to disk or environment variables.
+- **Keychain Integration:** All passwords are encrypted and stored in the native macOS Keychain (`kSecClassGenericPassword`). No plain-text secrets. ever. iCloud Keychain sync is explicitly opted out.
+- **SSRF Mitigation:** Hostname validation blocks local loopback, cloud metadata (169.254.x.x), and (when opted in) private IP ranges. Encoded-IP notation (octal, hex, decimal, URL-encoded) is rejected before any connection is attempted.
+- **Strict Input Validation:** Shell metacharacters in host fields and control characters in profile names are rejected. SSH key paths are validated with symlink-chain resolution and a dangerous-prefix allowlist.
+- **In-Memory Password Delivery:** SSH and RDP credentials are written directly to the PTY in response to the server's `Password:` prompt. There is no askpass helper script, no on-disk artifact, and no `ps aux` leak. The previous askpass-pipe approach was retired (see `PROBLEMS.md` P0-1) because `/usr/bin/ssh` closes inherited file descriptors above 2 at startup before spawning the helper.
+- **Safe-by-Default Remote Content:** Remote → local clipboard writes (SwiftTerm OSC 52, VNC `ServerCutText`) and remote → local URL opening are **off by default** and can be turned on per-user via Settings → Security.
 
 ### 🖥️ Core Capabilities
-- **SSH Terminal:** Tabbed PTY sessions supporting interactive remote terminal connections.
-- **VNC Support (Experimental):** A native RFB 3.8 client implementation supporting Raw and CopyRect encodings, DES authentication, mouse/keyboard inputs, and clipboard synchronization.
-- **RDP Integration (Experimental):** Secure RDP integration launching local `xfreerdp` (FreeRDP) with PTY password mapping to stdin/environment variables, or falling back to launching the Microsoft Remote Desktop app.
+- **SSH Terminal:** Tabbed PTY sessions with real-time PTY password delivery, no on-disk password artifacts, and bounded output buffers per session.
+- **VNC Support (Experimental):** A native RFB 3.8 client implementation supporting Raw and CopyRect encodings, DES authentication, mouse/keyboard inputs, and server-bounded framebuffer parsing. Tight/CoRRE/ZRRE encodings and reverse connections are not implemented yet.
+- **RDP Integration (Experimental):** Launches a local `xfreerdp` (FreeRDP) with PTY prompt-detection for password delivery, or hands off to the Microsoft Remote Desktop URL scheme when `xfreerdp` is not installed.
 - **SwiftData Profiles:** Organize connections efficiently using tags, favorites, and searchable metadata.
 - **Visual Design:** A beautifully crafted, responsive sidebar and detail view built entirely in modern SwiftUI.
 - **Extensive Logging:** A fully isolated logging ring-buffer captures lifecycle events for easy debugging without leaking sensitive information.
@@ -45,8 +48,8 @@ RemminaMac is a powerful, native macOS remote connection manager inspired by the
 ### Prerequisites
 
 - **macOS 14 Sonoma** (or later)
-- **Xcode 15** (or later)
-- **Swift 5.9+ Toolchain**
+- **Xcode 16** (or later, ships with Swift 6.0)
+- The test target uses Swift Testing, which requires Swift 6.0+
 
 ### Installation
 
@@ -73,7 +76,7 @@ RemminaMac is a powerful, native macOS remote connection manager inspired by the
 
 ## 🧪 Testing
 
-RemminaMac is backed by an extensive, robust test suite (142 passing tests) ensuring absolute reliability in production. Our test matrix covers deep SSRF injection bypasses, edge-case UI state roundtripping, keychain boundaries, and stress-tested internal buffers.
+RemminaMac is backed by an extensive, robust test suite. Our test matrix covers deep SSRF injection bypasses, edge-case UI state roundtripping, keychain boundaries, VNC parser bounds, SSH PTY-write credential delivery, and stress-tested internal buffers.
 
 Run the test suite via:
 ```bash
@@ -88,13 +91,14 @@ RemminaMac employs a strict **MVVM** and Data-Store architecture to clearly sepa
 
 ```mermaid
 graph TD
-    UI[SwiftUI Views] --> VM[ViewModels @State]
-    VM --> ST[Stores @Observable]
+    UI[SwiftUI Views] --> ST[Stores @Observable]
     ST -.-> PS[ProfileStore / SwiftData]
     ST -.-> KS[KeychainStore / Security API]
+    ST -.-> SS[SecuritySettings / UserDefaults]
     ST -.-> CM[ConnectionManager]
     CM --> SSH[SSHSession PTY]
-    CM -.-> VNC[VNC / RDP Stub]
+    CM --> VNC[VNCSession RFB 3.8]
+    CM --> RDP[RDPSession xfreerdp / MSRD]
 ```
 
 ---

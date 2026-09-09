@@ -95,7 +95,7 @@ enum HostnameValidator {
         if let ipAddress = IPv4Address(trimmed) {
             try validateIPv4(ipAddress, blockPrivateRanges: blockPrivateRanges, blockLocalhost: blockLocalhost)
         } else if let ipAddress = IPv6Address(trimmed) {
-            try validateIPv6(ipAddress, blockLocalhost: blockLocalhost)
+            try validateIPv6(ipAddress, blockPrivateRanges: blockPrivateRanges, blockLocalhost: blockLocalhost)
         } else {
             // Validate as hostname/FQDN
             try validateHostnameFormat(trimmed)
@@ -172,15 +172,27 @@ enum HostnameValidator {
         }
     }
     
-    private static func validateIPv6(_ ip: IPv6Address, blockLocalhost: Bool) throws {
+    private static func validateIPv6(_ ip: IPv6Address, blockPrivateRanges: Bool, blockLocalhost: Bool) throws {
+        let rawValue = Array(ip.rawValue)
+
+        // IPv4-mapped IPv6 (::ffff:a.b.c.d). Apply the IPv4 rules to the embedded
+        // address so a mapped loopback / link-local / private range is caught
+        // (e.g. ::ffff:127.0.0.1 must not slip past the loopback block).
+        if rawValue.count == 16,
+           rawValue[0..<10].allSatisfy({ $0 == 0 }),
+           rawValue[10] == 0xff, rawValue[11] == 0xff,
+           let mapped = IPv4Address("\(rawValue[12]).\(rawValue[13]).\(rawValue[14]).\(rawValue[15])") {
+            try validateIPv4(mapped, blockPrivateRanges: blockPrivateRanges, blockLocalhost: blockLocalhost)
+            return
+        }
+
         // Block ::1 (loopback)
         if blockLocalhost && ip == IPv6Address.loopback {
             throw ValidationError.blockedLoopback
         }
-        
+
         // Block link-local (fe80::/10)
-        let rawValue = ip.rawValue
-        if rawValue[0] == 0xfe && (rawValue[1] & 0xc0) == 0x80 {
+        if rawValue.count == 16, rawValue[0] == 0xfe && (rawValue[1] & 0xc0) == 0x80 {
             throw ValidationError.blockedLinkLocal
         }
     }
@@ -206,8 +218,10 @@ enum HostnameValidator {
                 throw ValidationError.invalidFormat
             }
             
-            // Label must be alphanumeric or hyphen
-            let validChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-"))
+            // Label must be alphanumeric, hyphen, or underscore. Underscores
+            // are not valid DNS but are common in SSH-config Host aliases (e.g.
+            // "dev_box"), which are legitimate connection targets for a client.
+            let validChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
             if label.unicodeScalars.contains(where: { !validChars.contains($0) }) {
                 throw ValidationError.invalidFormat
             }

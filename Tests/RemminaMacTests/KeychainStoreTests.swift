@@ -95,4 +95,32 @@ struct KeychainStoreTests {
         // Cleanup
         store.deletePassword(for: profileId)
     }
+
+    @Test("Throwing password(for:) retrieves saved password")
+    func testThrowingPasswordRetrieve() throws {
+        let store = KeychainStore.shared
+        let profileId = UUID()
+        let pass = "secret-\(UUID().uuidString.prefix(6))"
+
+        _ = store.savePassword(pass, for: profileId)
+        defer { store.deletePassword(for: profileId) }
+
+        let retrieved = try store.password(for: profileId)
+        #expect(retrieved == pass)
+    }
+
+    @Test("Throwing password(for:) returns nil for non-existent")
+    func testThrowingPasswordNonExistent() throws {
+        let store = KeychainStore.shared
+        let profileId = UUID()
+
+        let retrieved = try store.password(for: profileId)
+        #expect(retrieved == nil)
+    }
+
+    @Test("KeychainError description includes error code")
+    func testKeychainErrorDescription() {
+        let err = KeychainError.unexpectedStatus(errSecAuthFailed)
+        #expect(err.errorDescription?.contains("\(errSecAuthFailed)") == true)
+    }
 }

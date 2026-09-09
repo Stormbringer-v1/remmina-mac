@@ -30,7 +30,19 @@ class TerminalCoordinator: NSObject, SwiftTerm.TerminalViewDelegate {
     func scrolled(source: SwiftTerm.TerminalView, position: Double) {}
 
     func requestOpenLink(source: SwiftTerm.TerminalView, link: String, params: [String: String]) {
-        if let url = URL(string: link) {
+        // The link text comes from the remote program. We refuse to open any
+        // URL unless the user has explicitly enabled remote link opening AND
+        // the URL's scheme is in the safe allowlist (http, https, mailto).
+        // This blocks the remote from invoking file://, ssh://, tel://, or
+        // any custom x-callback-url scheme that another app may have
+        // registered as a handler.
+        guard let url = URL(string: link) else { return }
+        MainActor.assumeIsolated {
+            guard SecuritySettings.shared.allowRemoteOpenLink else { return }
+            guard SecuritySettings.isLinkSchemeAllowed(url) else {
+                AppLogger.shared.log("Terminal: refused remote open of \(url.scheme ?? "nil") URL", level: .warning)
+                return
+            }
             NSWorkspace.shared.open(url)
         }
     }
@@ -40,7 +52,15 @@ class TerminalCoordinator: NSObject, SwiftTerm.TerminalViewDelegate {
     }
 
     func clipboardCopy(source: SwiftTerm.TerminalView, content: Data) {
-        if let str = String(data: content, encoding: .utf8) {
+        // The clipboard content comes from the remote program (OSC 52). We
+        // refuse to overwrite the local pasteboard unless the user has
+        // explicitly enabled remote→local clipboard sync. This blocks a
+        // hostile or compromised remote from silently replacing clipboard
+        // contents (e.g. with a malicious URL the user later pastes into a
+        // browser).
+        MainActor.assumeIsolated {
+            guard SecuritySettings.shared.allowRemoteClipboard else { return }
+            guard let str = String(data: content, encoding: .utf8) else { return }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(str, forType: .string)
         }

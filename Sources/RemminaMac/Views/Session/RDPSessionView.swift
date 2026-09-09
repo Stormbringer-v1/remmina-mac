@@ -3,14 +3,17 @@ import SwiftUI
 /// View for RDP sessions, showing xfreerdp output or setup instructions.
 struct RDPSessionView: View {
     let session: RDPSession
+    @Environment(ConnectionManager.self) private var connectionManager
     @State private var outputText = ""
     @State private var showingSetup = false
 
     var body: some View {
+        let status = connectionManager.status(for: session.id)
+
         VStack(spacing: 0) {
-            if case .error(let msg) = session.status {
+            if case .error(let msg) = status {
                 setupInstructionsView(error: msg)
-            } else if case .connected = session.status {
+            } else if case .connected = status {
                 connectedView
             } else {
                 connectingView
@@ -19,6 +22,9 @@ struct RDPSessionView: View {
         .onAppear {
             session.onOutputReceived = { text in
                 outputText += text
+                if outputText.utf8.count > 65_536 {
+                    outputText = String(outputText.suffix(32_768))
+                }
             }
         }
     }
@@ -52,20 +58,6 @@ struct RDPSessionView: View {
                 }
 
                 Spacer()
-
-                Button(action: {
-                    session.sendCtrlAltDel()
-                }) {
-                    Label("Ctrl+Alt+Del", systemImage: "keyboard")
-                        .font(.caption)
-                }
-                .controlSize(.small)
-
-                Button(action: takeScreenshot) {
-                    Label("Screenshot", systemImage: "camera")
-                        .font(.caption)
-                }
-                .controlSize(.small)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
@@ -161,10 +153,5 @@ struct RDPSessionView: View {
             .controlSize(.large)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func takeScreenshot() {
-        // For xfreerdp, screenshot would require integration
-        AppLogger.shared.log("RDP: Screenshot not available in external window mode", level: .warning)
     }
 }

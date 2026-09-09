@@ -101,15 +101,28 @@ struct MainView: View {
         }
         .sheet(isPresented: $showingEditProfile) {
             if let profile = selectedProfile {
-                ProfileEditView(mode: .edit(profile)) { _, password in
+                ProfileEditView(mode: .edit(profile)) { editedProfile, password in
+                    // Run the full ProfileValidator over the edited profile
+                    // before saving. Previously the edit path wrote fields
+                    // straight into the model and only the host was
+                    // re-checked at connect time, which meant a bad port /
+                    // username / notes length would surface as a confusing
+                    // ssh error later instead of a clear validation message.
+                    do {
+                        try ProfileValidator.validate(editedProfile)
+                    } catch {
+                        validationError = error.localizedDescription
+                        showingValidationError = true
+                        return
+                    }
                     // Password is only saved if the user actually changed it
                     // (tracked by passwordDirty flag in ProfileEditView)
                     if let password = password {
                         if password.isEmpty {
                             // User explicitly cleared the password
-                            KeychainStore.shared.deletePassword(for: profile.id)
+                            KeychainStore.shared.deletePassword(for: editedProfile.id)
                         } else {
-                            _ = KeychainStore.shared.updatePassword(password, for: profile.id)
+                            _ = KeychainStore.shared.updatePassword(password, for: editedProfile.id)
                         }
                     }
                     // password == nil means user didn't touch the password field
@@ -253,8 +266,12 @@ struct MainView: View {
     }
 
     private func connectToProfile(_ profile: ConnectionProfile) {
-        profileStore?.markConnected(profile)
-        connectionManager.openSession(for: profile)
+        // Only stamp "last connected" (which feeds the Recents filter) when a
+        // session is actually opened — not on a validation failure, a duplicate,
+        // or when the max-session limit has been reached.
+        if connectionManager.openSession(for: profile) {
+            profileStore?.markConnected(profile)
+        }
     }
 
     /// Requests deletion with confirmation dialog (no one-click data loss)
@@ -276,8 +293,9 @@ struct MainView: View {
     private func autoConnectOnOpen() {
         let autoConnectProfiles = allProfiles.filter { $0.connectOnOpen }
         for profile in autoConnectProfiles {
-            profileStore?.markConnected(profile)
-            connectionManager.openSession(for: profile)
+            if connectionManager.openSession(for: profile) {
+                profileStore?.markConnected(profile)
+            }
         }
         if !autoConnectProfiles.isEmpty {
             AppLogger.shared.log("Auto-connected \(autoConnectProfiles.count) profile(s) on launch")

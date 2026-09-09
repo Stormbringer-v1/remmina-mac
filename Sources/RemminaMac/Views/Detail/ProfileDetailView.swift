@@ -7,7 +7,16 @@ struct ProfileDetailView: View {
     let onEdit: () -> Void
     let onDelete: () -> Void
 
-    @State private var showDeleteConfirmation = false
+    enum PasswordStatus {
+        case notSet
+        case stored
+        case accessDenied
+    }
+
+    /// Cached Keychain password status. Read once on appear / when the
+    /// profile changes, not during body evaluation — a Keychain lookup can block
+    /// and can trigger an access prompt, neither of which belongs in layout.
+    @State private var passwordStatus: PasswordStatus = .notSet
 
     var body: some View {
         ScrollView {
@@ -43,12 +52,8 @@ struct ProfileDetailView: View {
             .padding(32)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .alert("Delete Profile", isPresented: $showDeleteConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Delete", role: .destructive) { onDelete() }
-        } message: {
-            Text("Are you sure you want to delete \"\(profile.name)\"? This cannot be undone.")
-        }
+        .onAppear { refreshHasStoredPassword() }
+        .onChange(of: profile.id) { _, _ in refreshHasStoredPassword() }
     }
 
     // MARK: - Sections
@@ -85,7 +90,7 @@ struct ProfileDetailView: View {
                 }
                 .buttonStyle(.bordered)
 
-                Button(role: .destructive, action: { showDeleteConfirmation = true }) {
+                Button(role: .destructive, action: onDelete) {
                     Label("Delete", systemImage: "trash")
                 }
                 .buttonStyle(.bordered)
@@ -128,11 +133,16 @@ struct ProfileDetailView: View {
                 Text("Password")
                     .foregroundStyle(.secondary)
                 Spacer()
-                if KeychainStore.shared.getPassword(for: profile.id) != nil {
+                switch passwordStatus {
+                case .stored:
                     Label("Stored in Keychain", systemImage: "lock.shield.fill")
                         .font(.caption)
                         .foregroundStyle(.green)
-                } else {
+                case .accessDenied:
+                    Label("Keychain access denied", systemImage: "exclamationmark.shield.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                case .notSet:
                     Text("Not set")
                         .foregroundStyle(.tertiary)
                 }
@@ -204,6 +214,18 @@ struct ProfileDetailView: View {
                     .font(.caption)
                     .foregroundStyle(.blue)
             }
+        }
+    }
+
+    private func refreshHasStoredPassword() {
+        do {
+            if try KeychainStore.shared.password(for: profile.id) != nil {
+                passwordStatus = .stored
+            } else {
+                passwordStatus = .notSet
+            }
+        } catch {
+            passwordStatus = .accessDenied
         }
     }
 

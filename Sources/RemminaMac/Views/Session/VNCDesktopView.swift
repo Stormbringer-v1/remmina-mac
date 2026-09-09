@@ -5,6 +5,10 @@ import AppKit
 struct VNCDesktopView: NSViewRepresentable {
     let session: VNCSession
     @Binding var currentImage: NSImage?
+    /// The union rectangle of pixels that changed in the most recent update,
+    /// in framebuffer pixel coordinates. The canvas asks AppKit to repaint
+    /// only this region (PROBLEMS.md ISSUE-024).
+    @Binding var dirtyRect: NSRect
     let fitToWindow: Bool
 
     func makeNSView(context: Context) -> VNCCanvasView {
@@ -17,7 +21,7 @@ struct VNCDesktopView: NSViewRepresentable {
     func updateNSView(_ canvas: VNCCanvasView, context: Context) {
         canvas.fitToWindow = fitToWindow
         if let image = currentImage {
-            canvas.updateImage(image)
+            canvas.updateImage(image, dirtyRect: dirtyRect)
         }
     }
 }
@@ -29,6 +33,10 @@ final class VNCCanvasView: NSView {
     private var framebufferImage: NSImage?
     private var imageRect: NSRect = .zero
     private var trackingArea: NSTrackingArea?
+    /// Modifier flag diffing (PROBLEMS.md ISSUE-023). The first
+    /// `flagsChanged` event establishes the baseline; subsequent events
+    /// only send key up/down for modifiers that actually changed.
+    private var lastFlags: NSEvent.ModifierFlags = []
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -59,9 +67,39 @@ final class VNCCanvasView: NSView {
         trackingArea = area
     }
 
-    func updateImage(_ image: NSImage) {
+    /// Receive a new framebuffer snapshot. We ask AppKit to repaint only
+    /// the dirty region (ISSUE-024) rather than the full canvas, which
+    /// keeps incremental updates cheap.
+    func updateImage(_ image: NSImage, dirtyRect: NSRect) {
         framebufferImage = image
-        needsDisplay = true
+        guard !dirtyRect.isEmpty, !dirtyRect.isNull else {
+            needsDisplay = true
+            return
+        }
+        // dirtyRect is in framebuffer coordinates; map to view coords.
+        let viewRect = mapDirtyToView(dirtyRect)
+        if viewRect.isNull || viewRect.isEmpty {
+            needsDisplay = true
+        } else {
+            setNeedsDisplay(viewRect)
+        }
+    }
+
+    /// Map a framebuffer-pixel dirty rectangle to the corresponding region
+    /// in view coordinates, accounting for fit-to-window scaling and
+    /// centering.
+    private func mapDirtyToView(_ fbRect: NSRect) -> NSRect {
+        guard let image = framebufferImage, imageRect.width > 0, imageRect.height > 0 else { return .null }
+        let imgSize = image.size
+        guard imgSize.width > 0, imgSize.height > 0 else { return .null }
+        let scaleX = imageRect.width / imgSize.width
+        let scaleY = imageRect.height / imgSize.height
+        return NSRect(
+            x: imageRect.minX + fbRect.minX * scaleX,
+            y: imageRect.minY + fbRect.minY * scaleY,
+            width: fbRect.width * scaleX,
+            height: fbRect.height * scaleY
+        )
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -75,7 +113,6 @@ final class VNCCanvasView: NSView {
         bounds.fill()
 
         if fitToWindow {
-            // Scale to fit while maintaining aspect ratio
             let imageSize = image.size
             let viewSize = bounds.size
             let scale = min(viewSize.width / imageSize.width, viewSize.height / imageSize.height)
@@ -150,11 +187,9 @@ final class VNCCanvasView: NSView {
         guard let (x, y) = translatePoint(point) else { return }
 
         if event.deltaY > 0 {
-            // Scroll up = button 4
             session?.sendPointerEvent(buttons: 8, x: x, y: y)
             session?.sendPointerEvent(buttons: 0, x: x, y: y)
         } else if event.deltaY < 0 {
-            // Scroll down = button 5
             session?.sendPointerEvent(buttons: 16, x: x, y: y)
             session?.sendPointerEvent(buttons: 0, x: x, y: y)
         }
@@ -163,17 +198,30 @@ final class VNCCanvasView: NSView {
     // MARK: - Keyboard Events
 
     override func keyDown(with event: NSEvent) {
-        let keysym = mapKeyToX11Keysym(event)
+        let keysym = VNCCanvasView.keysym(
+            keyCode: event.keyCode,
+            characters: event.characters,
+            charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+            flags: event.modifierFlags
+        )
         session?.sendKeyEvent(down: true, key: keysym)
     }
 
     override func keyUp(with event: NSEvent) {
-        let keysym = mapKeyToX11Keysym(event)
+        let keysym = VNCCanvasView.keysym(
+            keyCode: event.keyCode,
+            characters: event.characters,
+            charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+            flags: event.modifierFlags
+        )
         session?.sendKeyEvent(down: false, key: keysym)
     }
 
+    /// PROBLEMS.md ISSUE-023: only emit a key up/down for modifiers whose
+    /// state actually changed since the previous `flagsChanged` event.
+    /// Otherwise we'd send spurious key-ups for modifiers that were never
+    /// down, which some servers interpret as real input.
     override func flagsChanged(with event: NSEvent) {
-        // Handle modifier keys
         let modMap: [(NSEvent.ModifierFlags, UInt32)] = [
             (.shift, 0xFFE1),    // XK_Shift_L
             (.control, 0xFFE3),  // XK_Control_L
@@ -183,15 +231,34 @@ final class VNCCanvasView: NSView {
         ]
 
         for (flag, keysym) in modMap {
+            let wasPressed = lastFlags.contains(flag)
             let isPressed = event.modifierFlags.contains(flag)
-            session?.sendKeyEvent(down: isPressed, key: keysym)
+            if wasPressed != isPressed {
+                session?.sendKeyEvent(down: isPressed, key: keysym)
+            }
         }
+        lastFlags = event.modifierFlags
     }
 
-    /// Map macOS key events to X11 keysyms used by VNC/RFB.
-    private func mapKeyToX11Keysym(_ event: NSEvent) -> UInt32 {
-        // Special keys
-        switch event.keyCode {
+    /// Map macOS key event data to an X11 keysym for the RFB KeyEvent
+    /// message (PROBLEMS.md ISSUE-023).
+    ///
+    /// Rules:
+    /// - The special-key table for `keyCode` wins (Return, Tab, arrows,
+    ///   F1..F12, etc.) — these have stable keysyms regardless of the
+    ///   typed character.
+    /// - When Control or Command is held we use
+    ///   `charactersIgnoringModifiers` so Ctrl+C produces XK_c (0x63),
+    ///   not U+0003. The typed character is what the user *means*, not
+    ///   the OS-cooked control glyph.
+    /// - Unicode scalars ≥ 0x100 use the `0x01000000 | codepoint` form
+    ///   required by the RFB spec for non-Latin-1 input.
+    static func keysym(keyCode: UInt16,
+                       characters: String?,
+                       charactersIgnoringModifiers: String?,
+                       flags: NSEvent.ModifierFlags) -> UInt32 {
+        // Special keys — independent of modifier state.
+        switch keyCode {
         case 36: return 0xFF0D  // Return
         case 48: return 0xFF09  // Tab
         case 51: return 0xFF08  // Backspace
@@ -221,11 +288,25 @@ final class VNCCanvasView: NSView {
         default: break
         }
 
-        // Regular characters
-        if let chars = event.characters, let scalar = chars.unicodeScalars.first {
-            return UInt32(scalar.value)
+        // Use the un-modified character when Control or Command is held so
+        // the remote sees a plain letter (Ctrl+C → 0x63) rather than the
+        // control glyph (0x03). For all other modifiers we use the
+        // cooked `characters`, which is what the user sees.
+        let base: String?
+        if flags.contains(.control) || flags.contains(.command) {
+            base = charactersIgnoringModifiers
+        } else {
+            base = characters
         }
 
-        return 0
+        guard let str = base, let scalar = str.unicodeScalars.first else {
+            return 0
+        }
+
+        let v = scalar.value
+        if v >= 0x100 {
+            return 0x01000000 | UInt32(v)
+        }
+        return UInt32(v)
     }
 }

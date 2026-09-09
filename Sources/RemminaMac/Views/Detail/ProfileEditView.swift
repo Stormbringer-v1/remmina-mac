@@ -25,6 +25,8 @@ struct ProfileEditView: View {
     @State private var isFavorite = false
     @State private var connectOnOpen = false
     @State private var sshKeyPath = ""
+    @State private var errorMessage: String?
+    @State private var showingErrorAlert = false
 
     private var isEditing: Bool {
         if case .edit = mode { return true }
@@ -81,8 +83,12 @@ struct ProfileEditView: View {
                                     }
                                 }
                                 .labelsHidden()
-                                .onChange(of: protocolType) { _, newValue in
-                                    if port.isEmpty || Int(port) == nil {
+                                .onChange(of: protocolType) { oldValue, newValue in
+                                    // Update the port when it is empty, invalid,
+                                    // or still the *previous* protocol's default
+                                    // (so SSH→VNC moves 22→5900). A custom port
+                                    // the user typed is left untouched.
+                                    if port.isEmpty || Int(port) == nil || Int(port) == oldValue.defaultPort {
                                         port = "\(newValue.defaultPort)"
                                     }
                                 }
@@ -250,6 +256,11 @@ struct ProfileEditView: View {
         }
         .frame(width: 520, height: 640)
         .onAppear { loadProfile() }
+        .alert("Invalid Profile", isPresented: $showingErrorAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage ?? "Unknown error")
+        }
     }
 
     // MARK: - Helpers
@@ -267,12 +278,6 @@ struct ProfileEditView: View {
             isFavorite = profile.isFavorite
             connectOnOpen = profile.connectOnOpen
             sshKeyPath = profile.sshKeyPath
-
-            if let saved = KeychainStore.shared.getPassword(for: profile.id) {
-                // Don't populate — show placeholder instead.
-                // This prevents accidental password deletion.
-                _ = saved // Password exists in Keychain
-            }
             passwordDirty = false  // Reset dirty flag for edit mode
         } else {
             port = "\(protocolType.defaultPort)"
@@ -285,42 +290,36 @@ struct ProfileEditView: View {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
 
-        let portNumber = Int(port) ?? protocolType.defaultPort
+        let draft = ProfileDraft(
+            name: name,
+            protocolType: protocolType,
+            host: host,
+            portText: port,
+            username: username,
+            domain: domain,
+            notes: notes,
+            tags: tags,
+            isFavorite: isFavorite,
+            connectOnOpen: connectOnOpen,
+            sshKeyPath: sshKeyPath
+        )
 
-        if case .edit(let profile) = mode {
-            profile.name = name
-            profile.protocolType = protocolType
-            profile.host = host
-            profile.port = portNumber
-            profile.username = username
-            profile.domain = domain
-            profile.notes = notes
-            profile.tags = tags
-            profile.isFavorite = isFavorite
-            profile.connectOnOpen = connectOnOpen
-            profile.sshKeyPath = sshKeyPath
-            // Only pass password if user actually modified it
-            // nil = don't touch Keychain, "" = user cleared it, "xyz" = new password
+        do {
+            let valid = try draft.validated()
             let passwordToSave: String? = passwordDirty ? password : nil
-            onSave(profile, passwordToSave)
-        } else {
-            let profile = ConnectionProfile(
-                name: name,
-                protocolType: protocolType,
-                host: host,
-                port: portNumber,
-                username: username,
-                domain: domain,
-                notes: notes,
-                tags: tags,
-                isFavorite: isFavorite,
-                connectOnOpen: connectOnOpen,
-                sshKeyPath: sshKeyPath
-            )
-            onSave(profile, password.isEmpty ? nil : password)
-        }
 
-        dismiss()
+            switch mode {
+            case .create:
+                onSave(valid.makeProfile(), password.isEmpty ? nil : password)
+            case .edit(let profile):
+                valid.apply(to: profile)
+                onSave(profile, passwordToSave)
+            }
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+            showingErrorAlert = true
+        }
     }
 
     private func browseSSHKey() {
@@ -334,8 +333,22 @@ struct ProfileEditView: View {
         panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
         panel.treatsFilePackagesAsDirectories = true
 
-        if panel.runModal() == .OK, let url = panel.url {
-            sshKeyPath = url.path
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        // The user just chose this file from an NSOpenPanel, so it's
+        // explicitly user-selected. Validate with `isUserSelected: true` so
+        // the key can live anywhere (not just ~/.ssh) but still gets the
+        // dangerous-prefix check on any symlink chain.
+        do {
+            let validated = try SSHKeyValidator.validate(url.path, isUserSelected: true)
+            sshKeyPath = validated
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Invalid SSH key"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
         }
     }
 
