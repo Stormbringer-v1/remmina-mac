@@ -302,4 +302,90 @@ struct PTYProcessTests {
         _ = exitSem.wait(timeout: .now() + 2)
         pty.closeMaster()
     }
+
+    // MARK: - ISSUE-031: write source teardown on EOF, no double-close/crash
+
+    /// Repeatedly writes to `pty` until `hasArmedWriteSource` becomes true (i.e. the
+    /// outbound buffer could not be fully drained into the tty because the child
+    /// never reads), or the timeout elapses. Returns whether the source armed.
+    private func armWriteSource(_ pty: PTYProcess, timeout: TimeInterval = 3.0) -> Bool {
+        let chunk = Data(repeating: 0x5A, count: 64 * 1024) // 64 KiB per write
+        let start = CFAbsoluteTimeGetCurrent()
+        while !pty.hasArmedWriteSource && (CFAbsoluteTimeGetCurrent() - start) < timeout {
+            pty.write(chunk)
+            usleep(10_000)
+        }
+        return pty.hasArmedWriteSource
+    }
+
+    @Test("EOF cancels writeSource even with buffered writes still pending (ISSUE-031a)")
+    func testEOFCancelsWriteSourceWithPendingWrites() throws {
+        let pty = PTYProcess()
+        let exitSem = DispatchSemaphore(value: 0)
+
+        // A child that never reads its stdin, so the outbound buffer cannot
+        // fully drain and a writeSource stays armed.
+        try pty.launch(path: "/bin/sh",
+                       args: ["-c", "stty raw -echo; sleep 30"],
+                       env: [:],
+                       onExit: { _ in exitSem.signal() },
+                       onExitQueue: .global())
+
+        let eofSem = DispatchSemaphore(value: 0)
+        pty.startReading(queue: .global(), onData: { _ in }, onEOF: {
+            eofSem.signal()
+        })
+
+        usleep(100_000) // allow "stty raw -echo" to take effect
+
+        let armed = armWriteSource(pty)
+        #expect(armed, "precondition: writeSource should arm once the outbound buffer cannot fully drain into a non-reading child")
+
+        // Kill the child; master sees EOF/HUP on the next read.
+        pty.terminate(gracePeriod: 5)
+
+        _ = exitSem.wait(timeout: .now() + 5)
+        _ = eofSem.wait(timeout: .now() + 5)
+        // Let the EOF handler's ioQueue.sync teardown finish.
+        usleep(150_000)
+
+        #expect(pty.hasArmedWriteSource == false, "writeSource must not remain armed on the closed fd after EOF")
+
+        pty.closeMaster() // idempotent — must not crash or double-close
+    }
+
+    @Test("Writing more than the tty can absorb, then killing the child, leaves no armed source and does not crash (ISSUE-031a)")
+    func testKillWithFullOutboundBufferLeavesNoArmedSource() throws {
+        let pty = PTYProcess()
+        let exitSem = DispatchSemaphore(value: 0)
+
+        try pty.launch(path: "/bin/sh",
+                       args: ["-c", "stty raw -echo; sleep 30"],
+                       env: [:],
+                       onExit: { _ in exitSem.signal() },
+                       onExitQueue: .global())
+
+        let eofSem = DispatchSemaphore(value: 0)
+        pty.startReading(queue: .global(), onData: { _ in }, onEOF: {
+            eofSem.signal()
+        })
+
+        usleep(100_000)
+
+        let armed = armWriteSource(pty)
+        #expect(armed, "precondition: outbound buffer should not fully drain into a non-reading child")
+
+        let childPid = pty.pid
+        #expect(childPid > 0)
+        kill(childPid, SIGKILL) // kill the child directly, not via terminate()
+
+        _ = exitSem.wait(timeout: .now() + 5)
+        _ = eofSem.wait(timeout: .now() + 5)
+        usleep(150_000)
+
+        #expect(pty.hasArmedWriteSource == false, "no write source should remain armed after the child is killed and EOF is observed")
+
+        // Must complete without crashing; closeMaster() must remain safe to call.
+        pty.closeMaster()
+    }
 }

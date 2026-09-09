@@ -70,10 +70,19 @@ final class PTYProcess: @unchecked Sendable {
 
     /// Checks if echo is enabled on the slave terminal attached to masterFD.
     /// Returns nil if masterFD is closed or tcgetattr fails; false if ECHO is off; true otherwise.
+    /// Reads masterFD under ioQueue to stay consistent with the read handler's
+    /// EOF teardown and closeMaster(), both of which mutate it there (ISSUE-031c).
     func echoEnabled() -> Bool? {
+        let fd = ioQueue.sync { masterFD }
         var t = termios()
-        guard masterFD >= 0, tcgetattr(masterFD, &t) == 0 else { return nil }
+        guard fd >= 0, tcgetattr(fd, &t) == 0 else { return nil }
         return (t.c_lflag & UInt(ECHO)) != 0
+    }
+
+    /// Test hook (ISSUE-031): true if a DispatchSourceWrite is currently armed
+    /// on the master fd. Not for production use by session code.
+    var hasArmedWriteSource: Bool {
+        ioQueue.sync { writeSource != nil }
     }
 
     /// Launches `path` with `args` (argv[0] is set to `path`) and `env`
@@ -183,8 +192,14 @@ final class PTYProcess: @unchecked Sendable {
     func startReading(queue: DispatchQueue,
                       onData: @escaping (Data) -> Void,
                       onEOF: @escaping () -> Void) {
-        guard masterFD >= 0, readSource == nil else { return }
-        let fd = masterFD
+        // Read masterFD and check readSource under ioQueue: closeMasterLocked() (called from
+        // the EOF branch below and from closeMaster()) mutates both there, and this call may
+        // run on an arbitrary caller thread (ISSUE-031c).
+        let fd: Int32 = ioQueue.sync {
+            guard masterFD >= 0, readSource == nil else { return -1 }
+            return masterFD
+        }
+        guard fd >= 0 else { return }
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
 
         source.setCancelHandler {
@@ -192,7 +207,7 @@ final class PTYProcess: @unchecked Sendable {
         }
 
         source.setEventHandler { [weak self, weak source] in
-            guard let self = self, let src = source else { return }
+            guard let self = self, source != nil else { return }
             var buffer = [UInt8](repeating: 0, count: 8192)
             let bytesRead = Foundation.read(fd, &buffer, buffer.count)
             if bytesRead > 0 {
@@ -203,21 +218,20 @@ final class PTYProcess: @unchecked Sendable {
                 if err == EAGAIN || err == EWOULDBLOCK || err == EINTR {
                     return
                 }
-                // EOF or error: cancel immediately to avoid busy-spin on level-triggered source (ISSUE-009)
-                src.cancel()
-                self.readSource = nil
-                self.masterFD = -1
+                // EOF or error: cancel immediately to avoid busy-spin on level-triggered source (ISSUE-009).
+                // Route through closeMasterLocked() on ioQueue so writeSource (which may still be
+                // armed if the outbound buffer had not drained) is torn down atomically with
+                // readSource/masterFD instead of being left dangling on a closed fd (ISSUE-031a/c).
+                self.ioQueue.sync { self.closeMasterLocked() }
                 onEOF()
             } else {
                 // bytesRead == 0 (EOF)
-                src.cancel()
-                self.readSource = nil
-                self.masterFD = -1
+                self.ioQueue.sync { self.closeMasterLocked() }
                 onEOF()
             }
         }
 
-        self.readSource = source
+        ioQueue.sync { self.readSource = source }
         source.resume()
     }
 
@@ -255,6 +269,7 @@ final class PTYProcess: @unchecked Sendable {
     }
 
     /// Attempts to write outboundBuffer into masterFD until EAGAIN / blocked.
+    /// Must be invoked on ioQueue (via appendAndDrain or the writeSource event handler).
     private func drainWriteBuffer() {
         guard masterFD >= 0, !outboundBuffer.isEmpty else {
             writeSource?.cancel()
@@ -263,11 +278,18 @@ final class PTYProcess: @unchecked Sendable {
         }
 
         let fd = masterFD
-        outboundBuffer.withUnsafeBytes { rawPtr in
+        // Snapshot the buffer and run the write loop over the snapshot's own
+        // storage. Mutating outboundBuffer (removeFirst/removeAll) happens only
+        // after withUnsafeBytes returns, never while its pointer is borrowed —
+        // mutating a collection under its own borrowed buffer pointer is an
+        // exclusive-access violation (ISSUE-031b).
+        let snapshot = outboundBuffer
+        var offset = 0
+        var hardError = false
+        snapshot.withUnsafeBytes { rawPtr in
             guard let base = rawPtr.baseAddress else { return }
-            var offset = 0
-            while offset < outboundBuffer.count {
-                let bytesLeft = outboundBuffer.count - offset
+            while offset < snapshot.count {
+                let bytesLeft = snapshot.count - offset
                 let n = Foundation.write(fd, base + offset, bytesLeft)
                 if n > 0 {
                     offset += n
@@ -275,15 +297,20 @@ final class PTYProcess: @unchecked Sendable {
                     break
                 } else {
                     // Write error (EPIPE, EBADF, etc.)
-                    outboundBuffer.removeAll()
-                    writeSource?.cancel()
-                    writeSource = nil
-                    return
+                    hardError = true
+                    break
                 }
             }
-            if offset > 0 {
-                outboundBuffer.removeFirst(offset)
-            }
+        }
+
+        if hardError {
+            outboundBuffer.removeAll()
+            writeSource?.cancel()
+            writeSource = nil
+            return
+        }
+        if offset > 0 {
+            outboundBuffer.removeFirst(offset)
         }
 
         if outboundBuffer.isEmpty {
@@ -335,13 +362,14 @@ final class PTYProcess: @unchecked Sendable {
         DispatchQueue.global().asyncAfter(deadline: .now() + gracePeriod, execute: killItem)
     }
 
-    /// Closes the PTY master and cancels all read/write sources and pending writes (ISSUE-009).
-    func closeMaster() {
-        ioQueue.sync {
-            outboundBuffer.removeAll()
-            writeSource?.cancel()
-            writeSource = nil
-        }
+    /// Cancels writeSource, clears outboundBuffer, cancels readSource, and closes
+    /// the fd exactly once (ISSUE-031a/c). Must be called while already executing
+    /// on `ioQueue` — callers are responsible for the `ioQueue.sync`/`async` wrap.
+    /// Idempotent: safe to call again once readSource is nil and masterFD is -1.
+    private func closeMasterLocked() {
+        writeSource?.cancel()
+        writeSource = nil
+        outboundBuffer.removeAll()
 
         if let source = readSource {
             readSource = nil
@@ -350,6 +378,15 @@ final class PTYProcess: @unchecked Sendable {
         } else if masterFD >= 0 {
             Foundation.close(masterFD)
             masterFD = -1
+        }
+    }
+
+    /// Closes the PTY master and cancels all read/write sources and pending writes (ISSUE-009).
+    /// Routes through closeMasterLocked() on ioQueue so this is safe to call even if the
+    /// EOF path (startReading's event handler) has already torn things down (ISSUE-031a).
+    func closeMaster() {
+        ioQueue.sync {
+            closeMasterLocked()
         }
     }
 

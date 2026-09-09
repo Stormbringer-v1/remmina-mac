@@ -36,8 +36,17 @@ final class FakeVNCServer: @unchecked Sendable {
     /// returns, no backpressure.
     private var receivedBuffer = Data()
     private let receivedBufferLock = NSLock()
-    /// Set true when `stop()` is called; the accept loop exits.
-    private var stopped = false
+    /// Set true when `stop()` is called; the accept loop exits. Backed by
+    /// `stateLock` (like `clientFD` above) because it's written from
+    /// whichever thread calls `stop()` and read from the accept-loop and
+    /// client-reader threads — a thread sanitizer run over the VNC tests
+    /// (PROBLEMS.md ISSUE-012) flagged the previous plain `Bool` as a
+    /// genuine data race.
+    private var _stopped = false
+    private var stopped: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _stopped }
+        set { stateLock.lock(); _stopped = newValue; stateLock.unlock() }
+    }
 
     enum ServerError: Error, LocalizedError {
         case socketCreate(String)

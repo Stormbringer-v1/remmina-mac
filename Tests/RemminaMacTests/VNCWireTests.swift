@@ -251,6 +251,110 @@ struct VNCWireTests {
                 "session did not deallocate after disconnect (still strongly held)")
     }
 
+    // MARK: - ISSUE-028: hostname resolution via getaddrinfo
+
+    @Test("VNCSession reaches a loopback server by IP literal")
+    func vncByIP() async throws {
+        let server = try FakeVNCServer.start(); defer { server.stop() }
+        let p = ConnectionProfile(name: "ip", protocolType: .vnc, host: "127.0.0.1", port: Int(server.port))
+        let s = VNCSession(profile: p, password: nil); s.connect()
+        #expect(server.waitForClient(timeout: 3.0) == true)
+    }
+
+    @Test("VNCSession reaches the same server by hostname 'localhost'")
+    func vncByHostname() async throws {
+        let server = try FakeVNCServer.start(); defer { server.stop() }
+        let p = ConnectionProfile(name: "name", protocolType: .vnc, host: "localhost", port: Int(server.port))
+        let s = VNCSession(profile: p, password: nil); s.connect()
+        #expect(server.waitForClient(timeout: 3.0) == true)
+    }
+
+    @Test("VNC: a non-resolving hostname reaches .error within 5s, not a 75s hang")
+    func testNonResolvingHostReachesErrorQuickly() throws {
+        let session = makeSession(host: "this-host-does-not-exist.invalid", port: 12345, name: "BadHost")
+        let t0 = Date()
+        session.connect()
+        let sawError = waitFor({
+            if case .error = session.status { return true }
+            return false
+        }, timeout: 5.0)
+        let elapsed = Date().timeIntervalSince(t0)
+        #expect(sawError, "Expected .error for a non-resolving host, got \(session.status)")
+        #expect(elapsed < 5.0, "Resolution failure took \(elapsed)s, expected < 5s")
+        session.disconnect()
+    }
+
+    @Test("VNC: a blackholed SYN reaches .error within the connect deadline, and the read thread exits")
+    func testBlackholedConnectReachesErrorAndReadThreadExits() throws {
+        // 192.0.2.0/24 is TEST-NET-1 (RFC 5737) — reserved for
+        // documentation, never routed. A SYN to it is dropped rather than
+        // RST'd or refused, so `connect()` never resolves on its own; this
+        // is the standard way to test a connect timeout without relying on
+        // a specific unreachable-but-still-somehow-responsive host.
+        // Confirmed on this machine: `connect()` to it does not return
+        // within 15s (an OS-level `nc -w 2 -z 192.0.2.13 3389` still hung
+        // well past its own 2s flag), so this genuinely exercises
+        // `attemptConnect`'s `waitForConnect` EINPROGRESS/poll path rather
+        // than an immediate ECONNREFUSED.
+        var session: VNCSession? = makeSession(host: "192.0.2.13", port: 3389, name: "Blackhole")
+        weak var weakSession = session
+        // Inject a short connect deadline so the test doesn't wait out the
+        // real 15s (PROBLEMS.md ISSUE-028's remediation guide applies the
+        // same "make it injectable" pattern used for readTimeoutSeconds).
+        session?.connectionTimeoutSeconds = 2.0
+        let t0 = Date()
+        session?.connect()
+        let sawError = waitFor({
+            if case .error = session?.status { return true }
+            return false
+        }, timeout: 5.0)
+        let elapsed = Date().timeIntervalSince(t0)
+        #expect(sawError, "Expected .error for a blackholed SYN, got \(String(describing: session?.status))")
+        #expect(elapsed < 4.0, "Blackholed connect took \(elapsed)s to fail, expected just over the 2s deadline")
+
+        // Drop the local strong reference; the read thread must have
+        // already exited (and released its own `self` capture) by the
+        // time attemptConnect's deadline fired, or this session leaks
+        // for up to ~75s (the OS's own TCP connect timeout) — exactly
+        // the ISSUE-028 defect this test guards against.
+        session = nil
+        let start = CFAbsoluteTimeGetCurrent()
+        while weakSession != nil && (CFAbsoluteTimeGetCurrent() - start) < 2.0 {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            usleep(20_000)
+        }
+        #expect(weakSession == nil, "session did not deallocate after a blackholed connect timed out")
+    }
+
+    // MARK: - ISSUE-029: the read deadline actually applies
+
+    @Test("VNC: a server that completes the handshake and then goes silent reaches .error just after the read deadline")
+    func testReadDeadlineFires() throws {
+        let server = try FakeVNCServer.start()
+        defer { server.stop() }
+        let session = makeSession(port: server.port, name: "SilentServer")
+        // Inject a short deadline so this test doesn't wait out the real
+        // 30s default (PROBLEMS.md ISSUE-029).
+        session.readTimeoutSeconds = 1
+        session.connect()
+        #expect(server.waitForClient())
+        server.sendHandshake(serverName: "Silent", width: 16, height: 16)
+        #expect(waitFor({ session.status == .connected }))
+
+        // Server goes silent from here on — no more bytes. The read
+        // thread is blocked in `readExact` waiting on the next message
+        // type byte; SO_RCVTIMEO should unblock it after ~1s.
+        let t0 = Date()
+        let sawError = waitFor({
+            if case .error = session.status { return true }
+            return false
+        }, timeout: 5.0)
+        let elapsed = Date().timeIntervalSince(t0)
+        #expect(sawError, "Expected .error after the read deadline, got \(session.status)")
+        #expect(elapsed < 4.0, "Read deadline took \(elapsed)s to fire, expected just over 1s")
+        session.disconnect()
+    }
+
     // MARK: - Issue-013: Clean EOF while .connected is treated as .disconnected
 
     @Test("VNC: clean server-side close is .disconnected, not .error")
