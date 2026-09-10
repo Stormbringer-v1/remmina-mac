@@ -32,25 +32,33 @@ struct PTYProcessTests {
         let sem = DispatchSemaphore(value: 0)
         let code = Box<Int32?>(nil)
 
+        let outputBox = Box<Data>(Data())
+        let eofSem = DispatchSemaphore(value: 0)
+
+        // Read source is armed inside launch so a fast-exiting `tty` cannot
+        // exit before the reader exists (ISSUE-033). Dedicated queues avoid
+        // global-queue starvation under the full parallel suite; generous
+        // timeouts absorb scheduler contention (the exit notification is
+        // async and must not be mistaken for a functional failure).
+        let exitQueue = DispatchQueue(label: "test.pty.exit")
+        let readQueue = DispatchQueue(label: "test.pty.read")
         try pty.launch(path: "/bin/sh",
                        args: ["-c", "tty"],
                        env: ["TERM": "xterm"],
                        onExit: { c in code.set(c); sem.signal() },
-                       onExitQueue: .global())
+                       onExitQueue: exitQueue,
+                       readQueue: readQueue,
+                       onData: { chunk in
+                           var current = outputBox.get()
+                           current.append(chunk)
+                           outputBox.set(current)
+                       },
+                       onEOF: {
+                           eofSem.signal()
+                       })
 
-        let outputBox = Box<Data>(Data())
-        let eofSem = DispatchSemaphore(value: 0)
-
-        pty.startReading(queue: .global(), onData: { chunk in
-            var current = outputBox.get()
-            current.append(chunk)
-            outputBox.set(current)
-        }, onEOF: {
-            eofSem.signal()
-        })
-
-        _ = sem.wait(timeout: .now() + 3)
-        _ = eofSem.wait(timeout: .now() + 1)
+        _ = sem.wait(timeout: .now() + 10)
+        _ = eofSem.wait(timeout: .now() + 5)
         #expect(code.get() == 0, "`tty` should exit 0")
 
         let text = String(data: outputBox.get(), encoding: .utf8) ?? ""

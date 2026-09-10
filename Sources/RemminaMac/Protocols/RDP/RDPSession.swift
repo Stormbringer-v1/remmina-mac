@@ -306,9 +306,13 @@ final class RDPSession: SessionProtocol {
             // Capture `newPty` (not `self.pty`) so a stale exit callback from a
             // superseded run acts on the object it belongs to, never on
             // whatever `self.pty` happens to point to by the time it fires.
+            // The read source is armed inside launch so a fast-exiting child
+            // cannot exit before the reader exists (ISSUE-033).
+            let readQueue = DispatchQueue.global(qos: .userInteractive)
+            let handlers = makeReadHandlers(on: readQueue)
             try newPty.launch(path: path, args: args, env: env, onExit: { [weak self] code in
                 self?.handleProcessExit(code, for: newPty)
-            })
+            }, readQueue: readQueue, onData: handlers.onData, onEOF: handlers.onEOF)
         } catch {
             DispatchQueue.main.async { [weak self] in
                 self?.cancelConnectionTimeout()
@@ -318,7 +322,6 @@ final class RDPSession: SessionProtocol {
             return
         }
 
-        startReading()
         schedulePostSpawnGrace()
     }
 
@@ -356,7 +359,16 @@ final class RDPSession: SessionProtocol {
     /// `pty` without going through `xfreerdp`.
     func startReading() {
         let readQueue = DispatchQueue.global(qos: .userInteractive)
-        pty.startReading(queue: readQueue, onData: { [weak self] data in
+        let handlers = makeReadHandlers(on: readQueue)
+        pty.startReading(queue: readQueue, onData: handlers.onData, onEOF: handlers.onEOF)
+    }
+
+    /// Shared onData/onEOF pair used both by `startReading()` (standalone,
+    /// for tests) and by `startXFreerdp` (armed inside `launch` to close the
+    /// launch-before-read race, ISSUE-033). No behavior difference between
+    /// the two paths.
+    private func makeReadHandlers(on readQueue: DispatchQueue) -> (onData: (Data) -> Void, onEOF: () -> Void) {
+        let onData: (Data) -> Void = { [weak self] data in
             guard let self = self else { return }
             if let text = String(data: data, encoding: .utf8) {
                 DispatchQueue.main.async {
@@ -364,7 +376,8 @@ final class RDPSession: SessionProtocol {
                 }
             }
             self.handlePossiblePasswordPrompt(in: data, on: readQueue)
-        }, onEOF: { [weak self] in
+        }
+        let onEOF: () -> Void = { [weak self] in
             guard let self = self else { return }
             DispatchQueue.main.async {
                 if self.status == .connected {
@@ -373,7 +386,8 @@ final class RDPSession: SessionProtocol {
                     self.cleanupAllResources()
                 }
             }
-        })
+        }
+        return (onData, onEOF)
     }
 
     /// Detects xfreerdp's password prompt using the same end-anchored

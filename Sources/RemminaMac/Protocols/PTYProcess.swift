@@ -89,11 +89,21 @@ final class PTYProcess: @unchecked Sendable {
     /// (KEY=VALUE pairs). On success `masterFD` and `pid` are populated and
     /// `onExit` is invoked exactly once, on `onExitQueue`, with the decoded
     /// exit code when the child terminates. The child is reaped internally.
+    ///
+    /// When `readQueue`/`onData`/`onEOF` are all provided, the read source is
+    /// armed inside `launch` — before `posix_spawn`, while the parent still
+    /// holds the slave open — so a fast-exiting child (e.g. `/bin/sh -c "tty"`)
+    /// cannot exit and close the slave before the reader exists (ISSUE-033).
+    /// Omit them to arm later via the standalone `startReading` (kept for
+    /// compatibility).
     func launch(path: String,
                 args: [String],
                 env: [String: String],
                 onExit: @escaping (Int32) -> Void,
-                onExitQueue: DispatchQueue = .main) throws {
+                onExitQueue: DispatchQueue = .main,
+                readQueue: DispatchQueue? = nil,
+                onData: ((Data) -> Void)? = nil,
+                onEOF: (() -> Void)? = nil) throws {
         // Enforce single-launch per instance (ISSUE-010)
         guard pid < 0 && masterFD < 0 else {
             throw SpawnError(message: "PTYProcess already launched")
@@ -158,17 +168,31 @@ final class PTYProcess: @unchecked Sendable {
         }
 
         var childPid: pid_t = 0
+        // Publish masterFD and arm the read source BEFORE posix_spawn, while
+        // the parent still holds the slave open (so no premature EOF can
+        // fire). This closes the launch-before-read race (ISSUE-033): a
+        // fast-exiting child can no longer exit before the reader exists.
+        let shouldArmReading = readQueue != nil && onData != nil && onEOF != nil
+        ioQueue.sync { self.masterFD = master }
+        if let rq = readQueue, let od = onData, let oe = onEOF {
+            armReadingSource(fd: master, queue: rq, onData: od, onEOF: oe)
+        }
+
         let rc = posix_spawn(&childPid, path, &actions, &attr, cArgs, cEnv)
 
         // The parent never uses the slave; the child has its own copy.
         close(slave)
 
         guard rc == 0 else {
-            close(master)
+            if shouldArmReading {
+                closeMaster()
+            } else {
+                close(master)
+                ioQueue.sync { self.masterFD = -1 }
+            }
             throw SpawnError(message: "posix_spawn failed: \(String(cString: strerror(rc)))")
         }
 
-        self.masterFD = master
         self.pid = childPid
 
         // Detached reaper. Holds no reference to any session object or self,
@@ -189,6 +213,8 @@ final class PTYProcess: @unchecked Sendable {
 
     /// Starts reading from masterFD using DispatchSourceRead.
     /// Closes masterFD in the cancel handler so no race can read an already-closed or reused fd.
+    /// Kept for compatibility; prefer passing `readQueue`/`onData`/`onEOF` to
+    /// `launch` so the source is armed before the child can exit (ISSUE-033).
     func startReading(queue: DispatchQueue,
                       onData: @escaping (Data) -> Void,
                       onEOF: @escaping () -> Void) {
@@ -200,6 +226,16 @@ final class PTYProcess: @unchecked Sendable {
             return masterFD
         }
         guard fd >= 0 else { return }
+        armReadingSource(fd: fd, queue: queue, onData: onData, onEOF: onEOF)
+    }
+
+    /// Creates, installs, and resumes the DispatchSourceRead for `fd`.
+    /// Callers must ensure `fd` is the live master and no read source is
+    /// armed yet. Shared by `launch` (armed pre-spawn) and `startReading`.
+    private func armReadingSource(fd: Int32,
+                                  queue: DispatchQueue,
+                                  onData: @escaping (Data) -> Void,
+                                  onEOF: @escaping () -> Void) {
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
 
         source.setCancelHandler {

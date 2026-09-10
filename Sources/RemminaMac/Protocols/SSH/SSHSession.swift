@@ -229,8 +229,24 @@ final class SSHSession: SessionProtocol {
         AppLogger.shared.log("SSH: Connecting to \(hostDescription)", sessionId: id, profileId: profileId, component: "SSHSession")
 
         do {
+            let readQueue = DispatchQueue.global(qos: .userInteractive)
             try pty.launch(path: path, args: args, env: env, onExit: { [weak self] code in
                 self?.handleProcessExit(code)
+            }, readQueue: readQueue, onData: { [weak self] data in
+                guard let self = self else { return }
+                DispatchQueue.main.async {
+                    self.terminalFeedHandler?(data)
+                }
+                self.handlePossiblePasswordPrompt(in: data, on: readQueue)
+            }, onEOF: { [weak self] in
+                guard let self = self else { return }
+                DispatchQueue.main.async {
+                    if self.status == .connected {
+                        self.status = .disconnected
+                        AppLogger.shared.log("SSH: Connection lost to \(self.host)", sessionId: self.id, profileId: self.profileId, component: "SSHSession")
+                        self.cleanupAllResources()
+                    }
+                }
             })
         } catch {
             DispatchQueue.main.async { [weak self] in
@@ -242,7 +258,6 @@ final class SSHSession: SessionProtocol {
             return
         }
 
-        startReading()
         schedulePostSpawnGrace()
     }
 
@@ -264,26 +279,6 @@ final class SSHSession: SessionProtocol {
     }
 
     // MARK: - PTY reading + password-prompt detection
-
-    private func startReading() {
-        let readQueue = DispatchQueue.global(qos: .userInteractive)
-        pty.startReading(queue: readQueue, onData: { [weak self] data in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                self.terminalFeedHandler?(data)
-            }
-            self.handlePossiblePasswordPrompt(in: data, on: readQueue)
-        }, onEOF: { [weak self] in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                if self.status == .connected {
-                    self.status = .disconnected
-                    AppLogger.shared.log("SSH: Connection lost to \(self.host)", sessionId: self.id, profileId: self.profileId, component: "SSHSession")
-                    self.cleanupAllResources()
-                }
-            }
-        })
-    }
 
     /// Detects ssh's password prompt and writes the stored password only when
     /// detector matches AND echoEnabled == false (ISSUE-005).
