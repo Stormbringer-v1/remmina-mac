@@ -49,6 +49,7 @@ final class RDPSession: SessionProtocol {
     // ever called off main. See the note on `init` below — the caller
     // (`ConnectionManager.defaultFactory`) does not currently pass these through.
     private let ignoreCert: Bool
+    private let displayMode: RDPDisplayMode
     private let clipboard: Bool
 
     /// Not `private` so tests can relaunch/inspect it directly (ISSUE-009/010).
@@ -95,7 +96,7 @@ final class RDPSession: SessionProtocol {
     ///     never enable clipboard sharing regardless of the user's setting.
     ///   - clipboard: mirrors `SecuritySettings.shared.allowRemoteClipboard ||
     ///     SecuritySettings.shared.sendLocalClipboard`. Same follow-up applies.
-    init(profile: ConnectionProfile, password: String? = nil, ignoreCert: Bool = false, clipboard: Bool = false) {
+    init(profile: ConnectionProfile, password: String? = nil, ignoreCert: Bool = false, clipboard: Bool = false, displayMode: RDPDisplayMode = .fullscreen) {
         self.profileId = profile.id
         self.profileName = profile.name
         self.host = profile.host
@@ -104,6 +105,7 @@ final class RDPSession: SessionProtocol {
         self.password = password
         self.domain = profile.domain
         self.ignoreCert = ignoreCert
+        self.displayMode = displayMode
         self.clipboard = clipboard
     }
 
@@ -226,13 +228,28 @@ final class RDPSession: SessionProtocol {
         username: String = "",
         domain: String = "",
         size: (width: Int, height: Int) = (1280, 800),
+        displayMode: RDPDisplayMode = .fullscreen,
         ignoreCert: Bool = false,
         clipboard: Bool = false
     ) -> [String] {
         var args: [String] = ["/v:\(host):\(port)"]
         if !username.isEmpty { args.append("/u:\(username)") }
         if !domain.isEmpty { args.append("/d:\(domain)") }
-        args.append("/size:\(size.width)x\(size.height)")
+        // Display sizing. Previously this always pinned /size:1280x800 and
+        // passed no display flags at all, so the session was stuck in a fixed
+        // small window with no way to go fullscreen — FreeRDP was never asked
+        // for one. `+dynamic-resolution` makes the remote desktop follow the
+        // window as it is resized, and is useful in every mode.
+        switch displayMode {
+        case .fullscreen:
+            args.append("/f")
+        case .fitWindow:
+            args.append("/size:\(size.width)x\(size.height)")
+            args.append("/smart-sizing")
+        case .fixedWindow:
+            args.append("/size:\(size.width)x\(size.height)")
+        }
+        args.append("+dynamic-resolution")
         args.append("/bpp:32")
         args.append(clipboard ? "+clipboard" : "-clipboard")
         args.append(ignoreCert ? "/cert:ignore" : "/cert:tofu")
@@ -343,6 +360,7 @@ final class RDPSession: SessionProtocol {
             username: username,
             domain: domain,
             size: (1280, 800),
+            displayMode: displayMode,
             ignoreCert: ignoreCert,
             clipboard: clipboard
         )

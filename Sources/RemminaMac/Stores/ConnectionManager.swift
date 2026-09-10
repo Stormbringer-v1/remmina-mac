@@ -66,7 +66,8 @@ final class ConnectionManager: SessionDelegate {
                 profile: profile,
                 password: password,
                 ignoreCert: SecuritySettings.shared.rdpIgnoreCertificate,
-                clipboard: SecuritySettings.shared.allowRemoteClipboard || SecuritySettings.shared.sendLocalClipboard
+                clipboard: SecuritySettings.shared.allowRemoteClipboard || SecuritySettings.shared.sendLocalClipboard,
+                displayMode: SecuritySettings.shared.rdpDisplayMode
             )
         }
     }

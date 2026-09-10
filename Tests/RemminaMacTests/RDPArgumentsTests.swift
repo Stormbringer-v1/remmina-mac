@@ -20,7 +20,8 @@ struct RDPArgumentsTests {
         #expect(args.contains("/v:rdp.example.com:3389"))
         #expect(args.contains("/u:testuser"))
         #expect(args.contains("/d:CORP"))
-        #expect(args.contains("/size:1920x1080"))
+        #expect(args.contains("/f"), "default display mode is fullscreen")
+        #expect(!args.contains(where: { $0.hasPrefix("/size:") }), "fullscreen must not pin a size")
         #expect(args.contains("/bpp:32"))
         #expect(args.contains("-clipboard"))
         #expect(!args.contains("+clipboard"))
@@ -71,7 +72,8 @@ struct RDPArgumentsTests {
 
         #expect(!args.contains { $0.hasPrefix("/u:") })
         #expect(!args.contains { $0.hasPrefix("/d:") })
-        #expect(args.contains("/size:1280x800"))
+        #expect(args.contains("/f"), "default display mode is fullscreen")
+        #expect(!args.contains(where: { $0.hasPrefix("/size:") }), "fullscreen must not pin a size")
     }
 
     // MARK: - ISSUE-005: shared PasswordPromptDetector, gated on echoEnabled()
@@ -375,5 +377,32 @@ private final class InvocationCounter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return count
+    }
+
+    @Test("Display mode fullscreen passes /f and no fixed size (ISSUE: no fullscreen)")
+    func testFullscreenMode() {
+        let args = RDPSession.buildArguments(host: "h", port: 3389, displayMode: .fullscreen)
+        #expect(args.contains("/f"))
+        #expect(!args.contains(where: { $0.hasPrefix("/size:") }))
+        #expect(args.contains("+dynamic-resolution"))
+    }
+
+    @Test("Display mode fitWindow scales into the window")
+    func testFitWindowMode() {
+        let args = RDPSession.buildArguments(host: "h", port: 3389,
+                                             size: (1440, 900), displayMode: .fitWindow)
+        #expect(args.contains("/size:1440x900"))
+        #expect(args.contains("/smart-sizing"))
+        #expect(!args.contains("/f"))
+        #expect(args.contains("+dynamic-resolution"))
+    }
+
+    @Test("Display mode fixedWindow pins a size and does not scale")
+    func testFixedWindowMode() {
+        let args = RDPSession.buildArguments(host: "h", port: 3389,
+                                             size: (1024, 768), displayMode: .fixedWindow)
+        #expect(args.contains("/size:1024x768"))
+        #expect(!args.contains("/smart-sizing"))
+        #expect(!args.contains("/f"))
     }
 }

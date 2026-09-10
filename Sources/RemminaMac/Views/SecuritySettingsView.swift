@@ -43,6 +43,16 @@ struct SecuritySettingsView: View {
             }
 
             Section {
+                Picker("Display", selection: $settings.rdpDisplayMode) {
+                    ForEach(RDPDisplayMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                Text(settings.rdpDisplayMode.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 Toggle("Ignore certificate validation errors",
                        isOn: $settings.rdpIgnoreCertificate)
                 Text("When enabled, RDP connections accept any server certificate without verification (/cert:ignore). Off by default (/cert:tofu: accept on first use, pin thereafter).")

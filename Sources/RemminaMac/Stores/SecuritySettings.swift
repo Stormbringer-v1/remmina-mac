@@ -57,7 +57,15 @@ final class SecuritySettings {
     /// The concrete store `credentialBackend` currently resolves to.
     var activeCredentialStore: CredentialStore { credentialBackend.store }
 
+    /// How RDP sessions present their window. Defaults to fullscreen, which
+    /// is what a remote desktop is normally for; the previous behaviour was a
+    /// fixed 1280x800 window with no way to go fullscreen at all.
+    var rdpDisplayMode: RDPDisplayMode {
+        didSet { UserDefaults.standard.set(rdpDisplayMode.rawValue, forKey: Keys.rdpDisplayMode) }
+    }
+
     private enum Keys {
+        static let rdpDisplayMode = "rdp.displayMode"
         static let allowRemoteClipboard = "security.allowRemoteClipboard"
         static let sendLocalClipboard = "security.sendLocalClipboard"
         static let allowRemoteOpenLink = "security.allowRemoteOpenLink"
@@ -71,6 +79,7 @@ final class SecuritySettings {
         self.sendLocalClipboard = UserDefaults.standard.bool(forKey: Keys.sendLocalClipboard)
         self.allowRemoteOpenLink = UserDefaults.standard.bool(forKey: Keys.allowRemoteOpenLink)
         self.rdpIgnoreCertificate = UserDefaults.standard.bool(forKey: Keys.rdpIgnoreCertificate)
+        self.rdpDisplayMode = RDPDisplayMode(rawValue: UserDefaults.standard.string(forKey: Keys.rdpDisplayMode) ?? "") ?? .fullscreen
         self.credentialBackend = CredentialBackend.current
     }
 
