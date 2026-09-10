@@ -29,10 +29,10 @@ jobs:
       # PROBLEMS.md ISSUE-030: fail CI on any new warning. Scoped to the
       # `swift build` step only (the main RemminaMac target, currently
       # warning-free) rather than Package.swift's target settings or the
-      # test step — the test target has pre-existing deprecation warnings
-      # from getPassword(for:) call sites in files outside this pass's
-      # ownership (SecurityTests.swift, C2AuditTests.swift), which would
-      # make -warnings-as-errors here fail CI on code this pass cannot fix.
+      # test step — the test target's former deprecated-accessor warnings
+      # are gone (call sites now use the throwing accessor), but the test
+      # step still runs without -warnings-as-errors to avoid failing CI
+      # on warnings from third-party test dependencies.
       - name: Build
         run: swift build -Xswiftc -warnings-as-errors
 

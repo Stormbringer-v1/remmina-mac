@@ -88,20 +88,6 @@ final class KeychainStore {
         return String(data: data, encoding: .utf8)
     }
 
-    /// Retrieves the password for a given profile ID.
-    ///
-    /// PROBLEMS.md ISSUE-016: `ConnectionManager.openSession` no longer
-    /// calls this — it calls the throwing `password(for:)` directly so a
-    /// Keychain read failure can't masquerade as "no password stored". This
-    /// wrapper is otherwise unused in Sources/ but is kept (not deleted)
-    /// because SecurityTests.swift and C2AuditTests.swift — test files
-    /// outside this pass's ownership — still call it; deleting it would
-    /// break their compilation.
-    @available(*, deprecated, message: "Use password(for:) which throws KeychainError on failure")
-    func getPassword(for profileId: UUID) -> String? {
-        return try? password(for: profileId)
-    }
-
     /// Deletes the password for a given profile ID.
     @discardableResult
     func deletePassword(for profileId: UUID) -> Bool {

@@ -135,7 +135,7 @@ struct SecurityTests {
     // MARK: - Keychain Edge Cases
     
     @Test("Unicode password round-trip through Keychain")
-    func testKeychainUnicodePassword() {
+    func testKeychainUnicodePassword() throws {
         let store = KeychainStore.shared
         let profileId = UUID()
         let unicodePassword = "пароль🔐中文密码"
@@ -143,14 +143,14 @@ struct SecurityTests {
         let saved = store.savePassword(unicodePassword, for: profileId)
         #expect(saved == true)
         
-        let retrieved = store.getPassword(for: profileId)
+        let retrieved = try store.password(for: profileId)
         #expect(retrieved == unicodePassword)
         
         store.deletePassword(for: profileId)
     }
     
     @Test("Very long password through Keychain")
-    func testKeychainLongPassword() {
+    func testKeychainLongPassword() throws {
         let store = KeychainStore.shared
         let profileId = UUID()
         let longPassword = String(repeating: "A", count: 10_000) // 10KB
@@ -158,14 +158,14 @@ struct SecurityTests {
         let saved = store.savePassword(longPassword, for: profileId)
         #expect(saved == true)
         
-        let retrieved = store.getPassword(for: profileId)
+        let retrieved = try store.password(for: profileId)
         #expect(retrieved == longPassword)
         
         store.deletePassword(for: profileId)
     }
     
     @Test("Special characters password through Keychain")
-    func testKeychainSpecialCharsPassword() {
+    func testKeychainSpecialCharsPassword() throws {
         let store = KeychainStore.shared
         let profileId = UUID()
         let specialPassword = #"p@$$w0rd!<>"'\&|;`$()"#
@@ -173,21 +173,21 @@ struct SecurityTests {
         let saved = store.savePassword(specialPassword, for: profileId)
         #expect(saved == true)
         
-        let retrieved = store.getPassword(for: profileId)
+        let retrieved = try store.password(for: profileId)
         #expect(retrieved == specialPassword)
         
         store.deletePassword(for: profileId)
     }
     
     @Test("Empty string password through Keychain")
-    func testKeychainEmptyPassword() {
+    func testKeychainEmptyPassword() throws {
         let store = KeychainStore.shared
         let profileId = UUID()
         
         let saved = store.savePassword("", for: profileId)
         #expect(saved == true)
         
-        let retrieved = store.getPassword(for: profileId)
+        let retrieved = try store.password(for: profileId)
         #expect(retrieved == "")
         
         store.deletePassword(for: profileId)

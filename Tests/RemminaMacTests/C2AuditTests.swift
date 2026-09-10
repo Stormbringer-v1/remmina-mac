@@ -104,7 +104,7 @@ struct C2AuditTests {
         // Save → should succeed on a test machine (Keychain available)
         _ = KeychainStore.shared.savePassword(testPwd, for: fakeId)
         // Get → retrieve it back
-        let retrieved = KeychainStore.shared.getPassword(for: fakeId)
+        let retrieved = try KeychainStore.shared.password(for: fakeId)
         // Delete → cleanup
         _ = KeychainStore.shared.deletePassword(for: fakeId)
 
