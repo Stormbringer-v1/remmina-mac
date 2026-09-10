@@ -27,7 +27,6 @@ enum SessionStatus: Equatable {
 /// Delegate protocol for session status callbacks.
 protocol SessionDelegate: AnyObject {
     func sessionDidChangeStatus(_ session: any SessionProtocol, status: SessionStatus)
-    func sessionDidReceiveOutput(_ session: any SessionProtocol, data: Data)
 }
 
 /// Common protocol for all remote sessions (SSH, VNC, RDP).

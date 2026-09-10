@@ -7,7 +7,7 @@ struct VNCSessionView: View {
     @State private var dirtyRect: NSRect = .null
     @State private var fitToWindow = true
     @State private var fbInfo = ""
-    @ObservedObject private var security = SecuritySettings.shared
+    @Bindable private var security = SecuritySettings.shared
 
     /// Local clipboard polling state. The poller only fires while the
     /// session is connected and the user has enabled
@@ -15,7 +15,12 @@ struct VNCSessionView: View {
     /// from the current change count so that enabling the toggle does
     /// NOT immediately send the existing pasteboard content (PROBLEMS.md
     /// ISSUE-021) — only a subsequent change triggers a send.
-    @State private var clipboardPollTimer: Timer?
+    ///
+    /// PROBLEMS.md ISSUE-030: this used to be a `Timer` whose closure read
+    /// `security` (a `@MainActor` type) directly — a warning under Swift 5
+    /// and a hard error under Swift 6, since a `Timer` closure is
+    /// `@Sendable`. Driving the poll from a `.task(id:)` instead keeps the
+    /// whole loop on the main actor with no Sendable boundary to cross.
     @State private var lastSentChangeCount: Int = 0
 
     var body: some View {
@@ -76,14 +81,12 @@ struct VNCSessionView: View {
                     fbInfo = "\(s.serverName) – \(s.framebufferWidth)×\(s.framebufferHeight)"
                 }
             }
-            startClipboardSyncIfNeeded()
         }
-        .onDisappear {
-            clipboardPollTimer?.invalidate()
-            clipboardPollTimer = nil
-        }
-        .onChange(of: security.sendLocalClipboard) { _, _ in
-            startClipboardSyncIfNeeded()
+        // Restarts automatically whenever the toggle flips, and is cancelled
+        // automatically when the view disappears — replaces the old
+        // Timer + onAppear/onDisappear/onChange trio.
+        .task(id: security.sendLocalClipboard) {
+            await runClipboardSyncLoop()
         }
     }
 
@@ -104,53 +107,57 @@ struct VNCSessionView: View {
         }
     }
 
-    /// Start (or restart) the local→remote clipboard poller (PROBLEMS.md
-    /// ISSUE-021).
+    /// The local→remote clipboard poller (PROBLEMS.md ISSUE-021), driven by
+    /// `.task(id:)` on `security.sendLocalClipboard`. Runs entirely on the
+    /// main actor — no `Timer`, no `Sendable` closure, no cross-actor
+    /// capture of `security` (PROBLEMS.md ISSUE-030).
     ///
     /// Seed `lastSentChangeCount` with the current pasteboard change count
-    /// BEFORE scheduling the timer. This is the bug fix: previously the
-    /// field was -1, so the first tick after enabling the toggle
-    /// unconditionally sent whatever was on the pasteboard to the remote
-    /// — including a password the user had just copied from a password
-    /// manager.
+    /// BEFORE the first poll. This is the bug fix: previously the field was
+    /// -1, so the first tick after enabling the toggle unconditionally sent
+    /// whatever was on the pasteboard to the remote — including a password
+    /// the user had just copied from a password manager.
     ///
     /// We also skip:
     ///   - pasteboards whose types include `org.nspasteboard.ConcealedType`
     ///     (1Password, Bitwarden, etc. mark sensitive content this way)
     ///   - strings larger than 64 KiB (matches the implicit VNC client
     ///     limit and prevents a giant paste from hogging the write queue)
-    private func startClipboardSyncIfNeeded() {
-        clipboardPollTimer?.invalidate()
-        clipboardPollTimer = nil
+    private func runClipboardSyncLoop() async {
         guard security.sendLocalClipboard else { return }
         // Seed: don't send the current contents.
         lastSentChangeCount = NSPasteboard.general.changeCount
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [session] _ in
-            guard security.sendLocalClipboard, session.status == .connected else { return }
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(for: .seconds(1))
+            } catch {
+                return // cancelled during sleep
+            }
+            if Task.isCancelled { return }
+            guard security.sendLocalClipboard, session.status == .connected else { continue }
             let pb = NSPasteboard.general
             let changeCount = pb.changeCount
             guard VNCSessionView.shouldSend(changeCount: changeCount, lastSent: lastSentChangeCount) else {
-                return
+                continue
             }
             // Concealed pasteboard (password managers).
             if let types = pb.types,
                types.contains(NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")) {
                 lastSentChangeCount = changeCount
-                return
+                continue
             }
             guard let text = pb.string(forType: .string), !text.isEmpty else {
                 lastSentChangeCount = changeCount
-                return
+                continue
             }
             // Cap outgoing size at 64 KiB.
             guard text.utf8.count <= 65_536 else {
                 lastSentChangeCount = changeCount
-                return
+                continue
             }
             lastSentChangeCount = changeCount
             session.sendClipboardText(text)
         }
-        clipboardPollTimer = timer
     }
 
     /// Pure decision for the clipboard-poller change detection (PROBLEMS.md

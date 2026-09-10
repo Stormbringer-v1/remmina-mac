@@ -26,6 +26,11 @@ struct VNCDesktopView: NSViewRepresentable {
     }
 }
 
+/// Conforms to `SessionFocusable` (PROBLEMS.md ISSUE-003) so
+/// `SessionTabView`'s focus search can find this view by type rather than
+/// by guessing from a stringified AppKit class name.
+extension VNCCanvasView: SessionFocusable {}
+
 /// NSView that renders the VNC framebuffer and handles mouse/keyboard input.
 final class VNCCanvasView: NSView {
     var session: VNCSession?

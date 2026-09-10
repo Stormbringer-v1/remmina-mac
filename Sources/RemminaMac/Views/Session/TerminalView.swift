@@ -12,6 +12,12 @@ import SwiftTerm
 /// - Scrollback buffer
 /// - Copy/paste (⌘C/⌘V)
 ///
+/// Conforms to `SessionFocusable` (PROBLEMS.md ISSUE-003) so
+/// `SessionTabView`'s focus search can find this view by type. SwiftTerm's
+/// `TerminalView` is a `final class` we don't own, but a protocol
+/// conformance can still be attached via extension.
+extension SwiftTerm.TerminalView: SessionFocusable {}
+
 /// This replaces the previous NSTextView + ANSI regex approach which could
 /// not handle any full-screen terminal application.
 struct TerminalView: NSViewRepresentable {
@@ -49,13 +55,11 @@ struct TerminalView: NSViewRepresentable {
     }
 
     func updateNSView(_ terminalView: SwiftTerm.TerminalView, context: Context) {
-        // Make the terminal the first responder on initial appearance
-        if !context.coordinator.hasFocused {
-            if let window = terminalView.window {
-                window.makeFirstResponder(terminalView)
-                context.coordinator.hasFocused = true
-            }
-        }
+        // PROBLEMS.md ISSUE-003: focus is now owned solely by
+        // SessionTabView's SessionContainerView, which finds this view via
+        // the SessionFocusable conformance above. The one-shot `hasFocused`
+        // makeFirstResponder that used to live here competed with that
+        // mechanism and has been removed.
     }
 
     func makeCoordinator() -> TerminalCoordinator {

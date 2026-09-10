@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import AppKit
+import SwiftTerm
 @testable import RemminaMac
 
 @Suite("Stress & Robustness Tests")
@@ -451,5 +453,23 @@ struct StressTests {
         let validIP = try HostnameValidator.validate("192.168.0.1")
         #expect(!validIP.isEmpty)
         #expect(edgeCases.count > 10)
+    }
+
+    // MARK: - ISSUE-003: SessionFocusable conformance
+
+    // The manual two-tab typing check (PROBLEMS.md ISSUE-003) cannot be
+    // automated, but the piece that check depends on — that
+    // SessionTabView's findFirstResponder actually recognizes the two
+    // session input views by protocol — can be. This does not exercise the
+    // responder-chain wiring itself, only that the conformances the fix
+    // relies on are attached to the right classes.
+    @Test("VNCCanvasView and SwiftTerm.TerminalView conform to SessionFocusable")
+    @MainActor
+    func testSessionFocusableConformances() {
+        let vncCanvas = VNCCanvasView()
+        #expect(vncCanvas is SessionFocusable)
+
+        let terminal = SwiftTerm.TerminalView(frame: .zero)
+        #expect(terminal is SessionFocusable)
     }
 }

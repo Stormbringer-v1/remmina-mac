@@ -20,9 +20,15 @@ enum KeychainError: Error, LocalizedError, Equatable {
 final class KeychainStore {
     static let shared = KeychainStore()
 
-    private let serviceName = "com.stormbringer-v1.remminamac.credentials"
+    private let serviceName: String
 
-    private init() {}
+    /// - Parameter service: Keychain service name to namespace items under.
+    ///   Defaults to the production service. Tests should pass a per-run
+    ///   random service name (PROBLEMS.md ISSUE-020) so keychain items are
+    ///   isolated from the developer's real credentials and from each other.
+    init(service: String = "com.stormbringer-v1.remminamac.credentials") {
+        self.serviceName = service
+    }
 
     // MARK: - Password Operations
 
@@ -83,6 +89,14 @@ final class KeychainStore {
     }
 
     /// Retrieves the password for a given profile ID.
+    ///
+    /// PROBLEMS.md ISSUE-016: `ConnectionManager.openSession` no longer
+    /// calls this — it calls the throwing `password(for:)` directly so a
+    /// Keychain read failure can't masquerade as "no password stored". This
+    /// wrapper is otherwise unused in Sources/ but is kept (not deleted)
+    /// because SecurityTests.swift and C2AuditTests.swift — test files
+    /// outside this pass's ownership — still call it; deleting it would
+    /// break their compilation.
     @available(*, deprecated, message: "Use password(for:) which throws KeychainError on failure")
     func getPassword(for profileId: UUID) -> String? {
         return try? password(for: profileId)

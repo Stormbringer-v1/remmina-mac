@@ -4,13 +4,21 @@ import Foundation
 
 @Suite("KeychainStore Tests")
 struct KeychainStoreTests {
-    // Note: These tests interact with the actual macOS Keychain.
-    // In a real CI environment, you would use a mock.
-    // These tests use unique profile IDs to avoid conflicts.
+    // PROBLEMS.md ISSUE-020: these tests used to run against
+    // `KeychainStore.shared`, which reads and writes the developer's real
+    // login keychain — slow, order-dependent, and a hazard on a CI runner
+    // whose keychain is locked. Each test now creates its own
+    // `KeychainStore(service:)` under a per-run random service name so
+    // items are namespaced away from the production service and from each
+    // other, and every test cleans up everything it wrote.
+
+    private func makeStore() -> KeychainStore {
+        KeychainStore(service: "com.stormbringer-v1.remminamac.tests.\(UUID().uuidString)")
+    }
 
     @Test("Save and retrieve password")
-    func testSaveAndRetrieve() {
-        let store = KeychainStore.shared
+    func testSaveAndRetrieve() throws {
+        let store = makeStore()
         let profileId = UUID()
         let password = "test-password-\(UUID().uuidString.prefix(8))"
 
@@ -19,7 +27,7 @@ struct KeychainStoreTests {
         #expect(saved == true)
 
         // Retrieve
-        let retrieved = store.getPassword(for: profileId)
+        let retrieved = try store.password(for: profileId)
         #expect(retrieved == password)
 
         // Cleanup
@@ -27,8 +35,8 @@ struct KeychainStoreTests {
     }
 
     @Test("Delete password")
-    func testDelete() {
-        let store = KeychainStore.shared
+    func testDelete() throws {
+        let store = makeStore()
         let profileId = UUID()
 
         // Save first
@@ -39,13 +47,13 @@ struct KeychainStoreTests {
         #expect(deleted == true)
 
         // Verify deleted
-        let retrieved = store.getPassword(for: profileId)
+        let retrieved = try store.password(for: profileId)
         #expect(retrieved == nil)
     }
 
     @Test("Update password")
-    func testUpdate() {
-        let store = KeychainStore.shared
+    func testUpdate() throws {
+        let store = makeStore()
         let profileId = UUID()
 
         // Save initial
@@ -56,7 +64,7 @@ struct KeychainStoreTests {
         #expect(updated == true)
 
         // Verify updated
-        let retrieved = store.getPassword(for: profileId)
+        let retrieved = try store.password(for: profileId)
         #expect(retrieved == "new-password")
 
         // Cleanup
@@ -64,17 +72,17 @@ struct KeychainStoreTests {
     }
 
     @Test("Retrieve non-existent password returns nil")
-    func testRetrieveNonExistent() {
-        let store = KeychainStore.shared
+    func testRetrieveNonExistent() throws {
+        let store = makeStore()
         let profileId = UUID()
 
-        let retrieved = store.getPassword(for: profileId)
+        let retrieved = try store.password(for: profileId)
         #expect(retrieved == nil)
     }
 
     @Test("Delete non-existent password succeeds")
     func testDeleteNonExistent() {
-        let store = KeychainStore.shared
+        let store = makeStore()
         let profileId = UUID()
 
         let deleted = store.deletePassword(for: profileId)
@@ -82,14 +90,14 @@ struct KeychainStoreTests {
     }
 
     @Test("Save overwrites existing password")
-    func testSaveOverwrite() {
-        let store = KeychainStore.shared
+    func testSaveOverwrite() throws {
+        let store = makeStore()
         let profileId = UUID()
 
         _ = store.savePassword("first", for: profileId)
         _ = store.savePassword("second", for: profileId)
 
-        let retrieved = store.getPassword(for: profileId)
+        let retrieved = try store.password(for: profileId)
         #expect(retrieved == "second")
 
         // Cleanup
@@ -98,7 +106,7 @@ struct KeychainStoreTests {
 
     @Test("Throwing password(for:) retrieves saved password")
     func testThrowingPasswordRetrieve() throws {
-        let store = KeychainStore.shared
+        let store = makeStore()
         let profileId = UUID()
         let pass = "secret-\(UUID().uuidString.prefix(6))"
 
@@ -111,11 +119,27 @@ struct KeychainStoreTests {
 
     @Test("Throwing password(for:) returns nil for non-existent")
     func testThrowingPasswordNonExistent() throws {
-        let store = KeychainStore.shared
+        let store = makeStore()
         let profileId = UUID()
 
         let retrieved = try store.password(for: profileId)
         #expect(retrieved == nil)
+    }
+
+    @Test("Two KeychainStore instances with different service names do not see each other's items")
+    func testServiceNamespaceIsolation() throws {
+        let storeA = makeStore()
+        let storeB = makeStore()
+        let profileId = UUID()
+
+        _ = storeA.savePassword("only-in-a", for: profileId)
+        defer { storeA.deletePassword(for: profileId) }
+
+        let seenFromB = try storeB.password(for: profileId)
+        #expect(seenFromB == nil, "a different service name must not see another instance's items")
+
+        let seenFromA = try storeA.password(for: profileId)
+        #expect(seenFromA == "only-in-a")
     }
 
     @Test("KeychainError description includes error code")

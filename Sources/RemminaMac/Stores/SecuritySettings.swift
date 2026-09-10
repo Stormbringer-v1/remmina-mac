@@ -1,5 +1,4 @@
 import Foundation
-import Combine
 import Observation
 
 /// User-controllable security toggles for remote-content side effects.
@@ -10,9 +9,13 @@ import Observation
 /// default them to the safer choice until the user opts in.
 ///
 /// Backed by `UserDefaults` so the settings persist across launches.
+///
+/// `@Observable` (not `ObservableObject`, PROBLEMS.md ISSUE-027a): this type
+/// has no `@Published` properties, so an `ObservableObject` conformance here
+/// would never fire `objectWillChange`. Views bind to it with `@Bindable`.
 @Observable
 @MainActor
-final class SecuritySettings: ObservableObject {
+final class SecuritySettings {
     static let shared = SecuritySettings()
 
     /// Whether the remote end is allowed to write to the local clipboard

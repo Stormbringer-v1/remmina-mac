@@ -279,18 +279,4 @@ struct ProfileImportExport {
         
         return try importProfiles(from: data)
     }
-    
-    // MARK: - Legacy (Deprecated)
-    
-    /// Legacy import method - returns nil on error instead of throwing
-    /// Use importProfiles(from:) or importFromFile(_:) for better error handling
-    @available(*, deprecated, message: "Use throwing version for better error handling")
-    static func legacyImportProfiles(from data: Data) -> [ConnectionProfile]? {
-        try? importProfiles(from: data)
-    }
-    
-    @available(*, deprecated, message: "Use throwing version for better error handling")
-    static func legacyImportFromFile(_ url: URL) -> [ConnectionProfile]? {
-        try? importFromFile(url)
-    }
 }

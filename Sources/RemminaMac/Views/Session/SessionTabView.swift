@@ -188,6 +188,16 @@ struct SessionTabView: View {
 
 // MARK: - AppKit Focus & Visibility Management
 
+/// Marker protocol for the NSView subclasses that should receive keyboard
+/// focus inside a session tab (PROBLEMS.md ISSUE-003). Replaces matching on
+/// a stringified type name (`!String(describing: type(of: view)).contains
+/// ("Hosting")`), which was fragile and coupled to AppKit's private view
+/// class naming. Conform the actual input-handling view for each protocol
+/// (`VNCCanvasView` in VNCDesktopView.swift, `SwiftTerm.TerminalView` via an
+/// extension in TerminalView.swift) rather than every `NSView` that happens
+/// to accept first responder.
+protocol SessionFocusable: NSView {}
+
 /// Manages AppKit focus and isHidden state for session views across tab switches (PROBLEMS.md ISSUE-003).
 private struct SessionContainerView<Content: View>: NSViewRepresentable {
     let isActive: Bool
@@ -249,8 +259,8 @@ private final class SessionHostingContainerView: NSView {
                 return found
             }
         }
-        if view.acceptsFirstResponder && !String(describing: type(of: view)).contains("Hosting") {
-            return view
+        if let focusable = view as? SessionFocusable, focusable.acceptsFirstResponder {
+            return focusable
         }
         return nil
     }

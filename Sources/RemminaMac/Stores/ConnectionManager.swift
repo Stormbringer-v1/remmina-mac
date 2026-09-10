@@ -7,14 +7,10 @@ import AppKit
 /// - Dock badge showing active connection count
 /// - Sleep/wake health checking
 /// - Duplicate session prevention
-/// - Bounded output buffers (1MB per session)
 @Observable
 final class ConnectionManager: SessionDelegate {
     private(set) var sessions: [any SessionProtocol] = []
     var activeSessionId: UUID?
-
-    /// Output buffers per session for terminal rendering.
-    private(set) var outputBuffers: [UUID: Data] = [:]
 
     /// Observable mirror of each session's status. The session classes are
     /// reference types but not @Observable, so views that want to redraw
@@ -43,7 +39,16 @@ final class ConnectionManager: SessionDelegate {
 
     // MARK: - Factory & Lifecycle
 
-    typealias SessionFactory = (ConnectionProfile, String?) -> any SessionProtocol
+    /// `@MainActor`-isolated (PROBLEMS.md regression fix, ex-ISSUE-032
+    /// follow-up): the default factory reads `SecuritySettings.shared`,
+    /// which is itself `@MainActor`. Without this annotation the factory
+    /// type would let a caller read that main-actor-isolated state from an
+    /// unenforced context — exactly the isolation trap ISSUE-032 removed
+    /// from `RDPSession.connect()`. `SessionProtocol.connect()` itself stays
+    /// un-isolated (RDPArgumentsTests exercises it from a background
+    /// thread), so only the factory and `openSession` (which invokes it)
+    /// are marked `@MainActor`, not the whole session type hierarchy.
+    typealias SessionFactory = @MainActor (ConnectionProfile, String?) -> any SessionProtocol
 
     static let defaultFactory: SessionFactory = { profile, password in
         switch profile.protocolType {
@@ -52,7 +57,17 @@ final class ConnectionManager: SessionDelegate {
         case .vnc:
             return VNCSession(profile: profile, password: password)
         case .rdp:
-            return RDPSession(profile: profile, password: password)
+            // Regression fix: previously called RDPSession(profile:password:)
+            // with ignoreCert/clipboard left at their defaults (false/false),
+            // so RDP always verified certificates and always disabled
+            // clipboard regardless of what the user configured in Security
+            // settings. Fails safe, but the toggles did nothing.
+            return RDPSession(
+                profile: profile,
+                password: password,
+                ignoreCert: SecuritySettings.shared.rdpIgnoreCertificate,
+                clipboard: SecuritySettings.shared.allowRemoteClipboard || SecuritySettings.shared.sendLocalClipboard
+            )
         }
     }
 
@@ -67,45 +82,67 @@ final class ConnectionManager: SessionDelegate {
     /// Maximum concurrent sessions to prevent resource exhaustion
     static let maxSessions = 20
 
-    /// Per-session output buffer ceiling (1 MiB). Once a session's scrollback
-    /// exceeds this, we trim the oldest bytes.
-    static let outputBufferMaxBytes = 1 << 20
-    /// When the buffer is trimmed, retain this many of the most-recent bytes
-    /// (512 KiB).
-    static let outputBufferTrimBytes = 1 << 19
+    /// Result of an `openSession` attempt (PROBLEMS.md ISSUE-016). Replaces
+    /// a bare `Bool`, which could not distinguish "no password stored" from
+    /// "Keychain read failed" — the latter must never fall through to
+    /// connecting with no credential.
+    enum OpenResult: Equatable {
+        case opened
+        case duplicate
+        case limitReached
+        case hostInvalid(String)
+        case keychainFailed(OSStatus)
+    }
 
     /// Opens a new session for the given profile.
-    /// Returns false if a session to this profile already exists (prevents duplicates)
-    /// or if the maximum session limit has been reached.
+    ///
+    /// `@MainActor` because it invokes `sessionFactory`, which for the
+    /// default factory reads `SecuritySettings.shared` synchronously
+    /// (see `defaultFactory`'s doc comment).
     @discardableResult
-    func openSession(for profile: ConnectionProfile) -> Bool {
+    @MainActor
+    func openSession(for profile: ConnectionProfile) -> OpenResult {
         // Re-validate host at connect time. Mutated/imported profiles might have bypassed UI validation.
         do {
             _ = try ProfileValidator.validateHost(profile.host)
         } catch {
             AppLogger.shared.log("Connection aborted: Host validation failed for \(profile.name) — \(error.localizedDescription)", level: .error)
-            return false
+            return .hostInvalid(error.localizedDescription)
         }
 
         // Prevent duplicate sessions to the same profile
         if let existing = sessions.first(where: { $0.profileId == profile.id && $0.status.isActive }) {
             activeSessionId = existing.id
             AppLogger.shared.log("Session already active for: \(profile.name) — switched to existing tab")
-            return false
+            return .duplicate
         }
 
         // Prevent resource exhaustion: enforce maximum session count
         if sessions.count >= Self.maxSessions {
             AppLogger.shared.log("Session limit reached (\(Self.maxSessions)) — cannot open new session for: \(profile.name)", level: .warning)
-            return false
+            return .limitReached
         }
 
-        let password = KeychainStore.shared.getPassword(for: profile.id)
+        // A denied Keychain prompt, a locked keychain, or a missing
+        // entitlement must abort the connection rather than silently
+        // proceeding with no credential (PROBLEMS.md ISSUE-016) — that was
+        // indistinguishable from "no password stored" under the deprecated
+        // `getPassword(for:)`.
+        let password: String?
+        do {
+            password = try KeychainStore.shared.password(for: profile.id)
+        } catch KeychainError.unexpectedStatus(let status) {
+            AppLogger.shared.log("Connection aborted: Keychain read failed for \(profile.name) — status \(status)", level: .error)
+            return .keychainFailed(status)
+        } catch {
+            AppLogger.shared.log("Connection aborted: Keychain read failed for \(profile.name) — \(error.localizedDescription)", level: .error)
+            return .keychainFailed(errSecIO)
+        }
+
         let session = sessionFactory(profile, password)
 
         session.delegate = self
         sessions.append(session)
-        outputBuffers[session.id] = Data()
         // Seed the observable status mirror with the initial status so views
         // don't briefly show "Disconnected" before the delegate fires.
         sessionStatuses[session.id] = session.status
@@ -114,14 +151,13 @@ final class ConnectionManager: SessionDelegate {
 
         updateDockBadge()
         AppLogger.shared.log("Session opened for profile: \(profile.name)")
-        return true
+        return .opened
     }
 
     func closeSession(_ session: any SessionProtocol) {
         session.delegate = nil
         session.disconnect()
         sessions.removeAll { $0.id == session.id }
-        outputBuffers.removeValue(forKey: session.id)
         sessionStatuses.removeValue(forKey: session.id)
 
         if activeSessionId == session.id {
@@ -143,14 +179,12 @@ final class ConnectionManager: SessionDelegate {
             session.disconnect()
         }
         sessions.removeAll()
-        outputBuffers.removeAll()
         sessionStatuses.removeAll()
         activeSessionId = nil
         updateDockBadge()
     }
 
     func reconnectSession(_ session: any SessionProtocol) {
-        outputBuffers[session.id] = Data()
         session.reconnect()
     }
 
@@ -201,19 +235,5 @@ final class ConnectionManager: SessionDelegate {
         sessionStatuses[session.id] = status
         AppLogger.shared.log("Session \(session.profileName) status: \(status.displayName)")
         updateDockBadge()
-    }
-
-    func sessionDidReceiveOutput(_ session: any SessionProtocol, data: Data) {
-        guard sessions.contains(where: { $0.id == session.id }) else { return }
-        if var buffer = outputBuffers[session.id] {
-            buffer.append(data)
-            // Keep at most 1 MB of scrollback per session; when the buffer
-            // overflows, trim to the most recent 512 KB so the user keeps
-            // the most recent context.
-            if buffer.count > ConnectionManager.outputBufferMaxBytes {
-                buffer = buffer.suffix(ConnectionManager.outputBufferTrimBytes)
-            }
-            outputBuffers[session.id] = buffer
-        }
     }
 }

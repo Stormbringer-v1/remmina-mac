@@ -102,19 +102,14 @@ struct MainView: View {
         .sheet(isPresented: $showingEditProfile) {
             if let profile = selectedProfile {
                 ProfileEditView(mode: .edit(profile)) { editedProfile, password in
-                    // Run the full ProfileValidator over the edited profile
-                    // before saving. Previously the edit path wrote fields
-                    // straight into the model and only the host was
-                    // re-checked at connect time, which meant a bad port /
-                    // username / notes length would surface as a confusing
-                    // ssh error later instead of a clear validation message.
-                    do {
-                        try ProfileValidator.validate(editedProfile)
-                    } catch {
-                        validationError = error.localizedDescription
-                        showingValidationError = true
-                        return
-                    }
+                    // PROBLEMS.md ISSUE-002: ProfileEditView.saveProfile() is
+                    // the single validation gate — it builds a ProfileDraft,
+                    // calls validated(), and only calls apply(to:) on
+                    // success. A second ProfileValidator.validate() call
+                    // here used to run AFTER apply(to:) had already written
+                    // the model and would normalize the live SwiftData
+                    // object in place a second time. Do not reintroduce it.
+                    //
                     // Password is only saved if the user actually changed it
                     // (tracked by passwordDirty flag in ProfileEditView)
                     if let password = password {
@@ -269,8 +264,17 @@ struct MainView: View {
         // Only stamp "last connected" (which feeds the Recents filter) when a
         // session is actually opened — not on a validation failure, a duplicate,
         // or when the max-session limit has been reached.
-        if connectionManager.openSession(for: profile) {
+        switch connectionManager.openSession(for: profile) {
+        case .opened:
             profileStore?.markConnected(profile)
+        case .duplicate, .limitReached:
+            break
+        case .hostInvalid(let reason):
+            validationError = reason
+            showingValidationError = true
+        case .keychainFailed(let status):
+            validationError = KeychainError.unexpectedStatus(status).localizedDescription
+            showingValidationError = true
         }
     }
 
@@ -292,13 +296,28 @@ struct MainView: View {
     /// Auto-connect profiles marked "Connect on open" at app launch
     private func autoConnectOnOpen() {
         let autoConnectProfiles = allProfiles.filter { $0.connectOnOpen }
+        var connectedCount = 0
+        var failures: [(String, String)] = []
         for profile in autoConnectProfiles {
-            if connectionManager.openSession(for: profile) {
+            switch connectionManager.openSession(for: profile) {
+            case .opened:
                 profileStore?.markConnected(profile)
+                connectedCount += 1
+            case .duplicate, .limitReached:
+                break
+            case .hostInvalid(let reason):
+                failures.append((profile.name, reason))
+            case .keychainFailed(let status):
+                failures.append((profile.name, KeychainError.unexpectedStatus(status).localizedDescription))
             }
         }
-        if !autoConnectProfiles.isEmpty {
-            AppLogger.shared.log("Auto-connected \(autoConnectProfiles.count) profile(s) on launch")
+        if connectedCount > 0 {
+            AppLogger.shared.log("Auto-connected \(connectedCount) profile(s) on launch")
+        }
+        if !failures.isEmpty {
+            let errorMsg = failures.map { "• \($0.0): \($0.1)" }.joined(separator: "\n")
+            validationError = "Failed to auto-connect \(failures.count) profile(s):\n\n\(errorMsg)"
+            showingValidationError = true
         }
     }
 
@@ -329,7 +348,13 @@ struct MainView: View {
                 
                 for profile in imported {
                     do {
-                        try profileStore?.add(profile)
+                        // PROBLEMS.md ISSUE-001: an imported profile's SSH
+                        // key almost never lives at the same path on this
+                        // machine, so allow the import to succeed with a
+                        // missing key file (ProfileStore.add logs a warning
+                        // naming the path). The create path (above) keeps
+                        // the strict default.
+                        try profileStore?.add(profile, allowMissingSSHKey: true)
                         successCount += 1
                     } catch {
                         failedProfiles.append((profile.name, error.localizedDescription))

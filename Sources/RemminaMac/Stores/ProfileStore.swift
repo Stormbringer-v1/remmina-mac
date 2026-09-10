@@ -16,6 +16,18 @@ final class ProfileStore {
         // Validate profile before adding
         try ProfileValidator.validate(profile, blockPrivateRanges: false, sshKeyAllowMissing: allowMissingSSHKey)
 
+        // PROBLEMS.md ISSUE-001: importing a profile whose SSH key file is
+        // absent on this machine is allowed when the caller opts in, but we
+        // still want a visible trail of which profiles need attention.
+        if allowMissingSSHKey, !profile.sshKeyPath.isEmpty,
+           !FileManager.default.fileExists(atPath: profile.sshKeyPath) {
+            AppLogger.shared.log(
+                "Profile '\(profile.name)' added with an SSH key that does not exist on this machine: \(profile.sshKeyPath)",
+                level: .warning,
+                profileId: profile.id
+            )
+        }
+
         modelContext.insert(profile)
         save()
         AppLogger.shared.log("Profile added: \(profile.name)", profileId: profile.id)
@@ -55,44 +67,14 @@ final class ProfileStore {
         return (try? modelContext.fetch(descriptor)) ?? []
     }
 
-    func search(query: String) -> [ConnectionProfile] {
-        if query.isEmpty {
-            return allProfiles()
-        }
-        let descriptor = FetchDescriptor<ConnectionProfile>(
-            predicate: #Predicate<ConnectionProfile> { profile in
-                profile.name.localizedStandardContains(query) ||
-                profile.host.localizedStandardContains(query) ||
-                profile.username.localizedStandardContains(query) ||
-                profile.tagsRawValue.localizedStandardContains(query)
-            },
-            sortBy: [SortDescriptor(\.name, order: .forward)]
-        )
-        return (try? modelContext.fetch(descriptor)) ?? []
-    }
-
+    // PROBLEMS.md ISSUE-027d: `search`/`recents`/`filterByTag` were dead code
+    // (MainView filters `@Query`'s in-memory array instead — see the comment
+    // on `filteredProfiles` there) and have been removed. `favorites()` is
+    // kept: it is exercised by ProfileStoreIntegrationTests.swift, a test
+    // file outside this pass's ownership.
     func favorites() -> [ConnectionProfile] {
         let descriptor = FetchDescriptor<ConnectionProfile>(
             predicate: #Predicate<ConnectionProfile> { $0.isFavorite },
-            sortBy: [SortDescriptor(\.name, order: .forward)]
-        )
-        return (try? modelContext.fetch(descriptor)) ?? []
-    }
-
-    func recents(limit: Int = 10) -> [ConnectionProfile] {
-        var descriptor = FetchDescriptor<ConnectionProfile>(
-            predicate: #Predicate<ConnectionProfile> { $0.lastConnectedAt != nil },
-            sortBy: [SortDescriptor(\.lastConnectedAt, order: .reverse)]
-        )
-        descriptor.fetchLimit = limit
-        return (try? modelContext.fetch(descriptor)) ?? []
-    }
-
-    func filterByTag(_ tag: String) -> [ConnectionProfile] {
-        let descriptor = FetchDescriptor<ConnectionProfile>(
-            predicate: #Predicate<ConnectionProfile> { profile in
-                profile.tagsRawValue.localizedStandardContains(tag)
-            },
             sortBy: [SortDescriptor(\.name, order: .forward)]
         )
         return (try? modelContext.fetch(descriptor)) ?? []
