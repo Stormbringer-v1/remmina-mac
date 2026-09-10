@@ -126,8 +126,8 @@ final class ConnectionManager: SessionDelegate {
         // A denied Keychain prompt, a locked keychain, or a missing
         // entitlement must abort the connection rather than silently
         // proceeding with no credential (PROBLEMS.md ISSUE-016) — that was
-        // indistinguishable from "no password stored" under the deprecated
-        // `getPassword(for:)`.
+        // indistinguishable from "no password stored" under the old
+        // non-throwing accessor (since removed).
         let password: String?
         do {
             password = try KeychainStore.shared.password(for: profile.id)
