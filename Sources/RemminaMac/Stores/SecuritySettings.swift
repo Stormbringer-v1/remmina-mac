@@ -43,6 +43,20 @@ final class SecuritySettings {
         didSet { UserDefaults.standard.set(rdpIgnoreCertificate, forKey: Keys.rdpIgnoreCertificate) }
     }
 
+    /// Which storage backend saved passwords use. Defaults to `.none`:
+    /// RemminaMac does not tie itself to Apple Keychain (or to any single
+    /// storage backend) so other integrators — and a future Linux/Windows
+    /// port — need no changes to the core, and an ad-hoc-signed rebuild no
+    /// longer triggers a Keychain ACL dialog. SSH keeps working via SSH
+    /// keys/ssh-agent with no backend at all; VNC/RDP profiles that need a
+    /// password require the user to opt into Keychain here.
+    var credentialBackend: CredentialBackend {
+        didSet { UserDefaults.standard.set(credentialBackend.rawValue, forKey: CredentialBackend.defaultsKey) }
+    }
+
+    /// The concrete store `credentialBackend` currently resolves to.
+    var activeCredentialStore: CredentialStore { credentialBackend.store }
+
     private enum Keys {
         static let allowRemoteClipboard = "security.allowRemoteClipboard"
         static let sendLocalClipboard = "security.sendLocalClipboard"
@@ -57,6 +71,7 @@ final class SecuritySettings {
         self.sendLocalClipboard = UserDefaults.standard.bool(forKey: Keys.sendLocalClipboard)
         self.allowRemoteOpenLink = UserDefaults.standard.bool(forKey: Keys.allowRemoteOpenLink)
         self.rdpIgnoreCertificate = UserDefaults.standard.bool(forKey: Keys.rdpIgnoreCertificate)
+        self.credentialBackend = CredentialBackend.current
     }
 
     /// URL schemes we consider safe for a remote-controlled `requestOpenLink`.
@@ -71,5 +86,40 @@ final class SecuritySettings {
     static func isLinkSchemeAllowed(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased() else { return false }
         return allowedLinkSchemes.contains(scheme)
+    }
+}
+
+extension SecuritySettings {
+    /// Which storage backend is used for saved credentials (passwords).
+    /// Persisted under UserDefaults key `security.credentialBackend`.
+    enum CredentialBackend: String, CaseIterable, Hashable, Identifiable {
+        case none
+        case keychain
+
+        var id: String { rawValue }
+
+        /// The concrete store this backend resolves to. `KeychainStore()`
+        /// (not `.shared`) because `KeychainStore` holds no state beyond an
+        /// immutable service name, so a fresh instance targeting the
+        /// production service behaves identically to a shared one — this
+        /// avoids a Sources-wide dependency on the singleton.
+        var store: CredentialStore {
+            switch self {
+            case .none: return NullCredentialStore.shared
+            case .keychain: return KeychainStore()
+            }
+        }
+
+        var displayName: String { store.displayName }
+
+        static let defaultsKey = "security.credentialBackend"
+
+        /// Reads the persisted choice directly from `UserDefaults`,
+        /// bypassing the `@MainActor`-isolated `SecuritySettings.shared`.
+        /// Nonisolated and thread-safe, so it's safe to use from contexts
+        /// that aren't on the main actor — see `ActiveCredentialStore`.
+        static var current: CredentialBackend {
+            CredentialBackend(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .none
+        }
     }
 }

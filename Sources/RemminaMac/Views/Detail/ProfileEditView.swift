@@ -11,6 +11,7 @@ struct ProfileEditView: View {
     let onSave: (ConnectionProfile, String?) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.credentialStore) private var credentialStore
 
     @State private var name = ""
     @State private var protocolType: ProtocolType = .ssh
@@ -139,6 +140,16 @@ struct ProfileEditView: View {
                                     .onChange(of: password) { _, _ in
                                         passwordDirty = true
                                     }
+                            }
+
+                            if !credentialStore.persists {
+                                HStack {
+                                    Spacer().frame(width: 80)
+                                    Text("Not saved — credential storage is set to None. Change it in Settings → Security.")
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
                             }
 
                             if protocolType == .rdp {

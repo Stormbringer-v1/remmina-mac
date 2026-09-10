@@ -127,3 +127,39 @@ final class KeychainStore {
         return status == errSecSuccess
     }
 }
+
+// MARK: - CredentialStore
+
+extension KeychainStore: CredentialStore {
+    var persists: Bool { true }
+    var displayName: String { "macOS Keychain" }
+
+    func secret(_ kind: SecretKind, for profileId: UUID) throws -> String? {
+        switch kind {
+        case .password:
+            return try password(for: profileId)
+        }
+    }
+
+    func save(_ secret: String, kind: SecretKind, for profileId: UUID) throws {
+        switch kind {
+        case .password:
+            guard savePassword(secret, for: profileId) else {
+                throw KeychainError.unexpectedStatus(errSecIO)
+            }
+        }
+    }
+
+    func delete(_ kind: SecretKind, for profileId: UUID) throws {
+        switch kind {
+        case .password:
+            guard deletePassword(for: profileId) else {
+                throw KeychainError.unexpectedStatus(errSecIO)
+            }
+        }
+    }
+
+    func deleteAll(for profileId: UUID) throws {
+        try delete(.password, for: profileId)
+    }
+}

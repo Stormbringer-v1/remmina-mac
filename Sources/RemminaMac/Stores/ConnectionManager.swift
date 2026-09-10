@@ -73,8 +73,18 @@ final class ConnectionManager: SessionDelegate {
 
     private let sessionFactory: SessionFactory
 
-    init(sessionFactory: @escaping SessionFactory = ConnectionManager.defaultFactory) {
+    /// Where per-profile passwords are read from before opening a session.
+    /// Defaults to `ActiveCredentialStore.shared`, which resolves whichever
+    /// backend is selected in Settings → Security → Credential Storage
+    /// (default: none — see `SecuritySettings.CredentialBackend`).
+    private let credentialStore: CredentialStore
+
+    init(
+        sessionFactory: @escaping SessionFactory = ConnectionManager.defaultFactory,
+        credentialStore: CredentialStore = ActiveCredentialStore.shared
+    ) {
         self.sessionFactory = sessionFactory
+        self.credentialStore = credentialStore
     }
 
     // MARK: - Session Management
@@ -92,6 +102,13 @@ final class ConnectionManager: SessionDelegate {
         case limitReached
         case hostInvalid(String)
         case keychainFailed(OSStatus)
+        /// VNC/RDP need a stored password for their own auth (DES challenge /
+        /// NLA); SSH does not (keys / ssh-agent cover it). This fires when no
+        /// secret is available AND the active `CredentialStore` intentionally
+        /// persists nothing — surfaced here rather than failing obscurely
+        /// deep inside `VNCSession`/`RDPSession`. A per-session password
+        /// prompt is a planned follow-up, not implemented yet.
+        case credentialUnavailable(String)
     }
 
     /// Opens a new session for the given profile.
@@ -130,13 +147,25 @@ final class ConnectionManager: SessionDelegate {
         // non-throwing accessor (since removed).
         let password: String?
         do {
-            password = try KeychainStore.shared.password(for: profile.id)
+            password = try credentialStore.secret(.password, for: profile.id)
         } catch KeychainError.unexpectedStatus(let status) {
             AppLogger.shared.log("Connection aborted: Keychain read failed for \(profile.name) — status \(status)", level: .error)
             return .keychainFailed(status)
         } catch {
             AppLogger.shared.log("Connection aborted: Keychain read failed for \(profile.name) — \(error.localizedDescription)", level: .error)
             return .keychainFailed(errSecIO)
+        }
+
+        // VNC and RDP require a password for their own protocol-level auth;
+        // SSH does not, since keys/ssh-agent cover it. With no secret
+        // available and a store that intentionally persists nothing, abort
+        // clearly instead of connecting with no credential and failing
+        // obscurely inside the session itself.
+        if password == nil, !credentialStore.persists,
+           profile.protocolType == .vnc || profile.protocolType == .rdp {
+            let message = "\(profile.protocolType.displayName) needs a saved password, but credential storage is set to None. Enable Keychain in Settings → Security, then try again."
+            AppLogger.shared.log("Connection aborted: \(profile.name) needs a stored credential but credential storage is disabled (Settings → Security)", level: .error)
+            return .credentialUnavailable(message)
         }
 
         let session = sessionFactory(profile, password)

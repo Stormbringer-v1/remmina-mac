@@ -7,6 +7,8 @@ struct ProfileDetailView: View {
     let onEdit: () -> Void
     let onDelete: () -> Void
 
+    @Environment(\.credentialStore) private var credentialStore
+
     enum PasswordStatus {
         case notSet
         case stored
@@ -54,6 +56,10 @@ struct ProfileDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear { refreshHasStoredPassword() }
         .onChange(of: profile.id) { _, _ in refreshHasStoredPassword() }
+        // Re-read when the user flips Settings → Security → Credential
+        // Storage while this same profile stays on screen (e.g. None →
+        // Keychain → back to a profile that now has a stored password).
+        .onChange(of: credentialStore.persists) { _, _ in refreshHasStoredPassword() }
     }
 
     // MARK: - Sections
@@ -133,18 +139,24 @@ struct ProfileDetailView: View {
                 Text("Password")
                     .foregroundStyle(.secondary)
                 Spacer()
-                switch passwordStatus {
-                case .stored:
-                    Label("Stored in Keychain", systemImage: "lock.shield.fill")
+                if !credentialStore.persists {
+                    Text("Not stored (storage disabled)")
                         .font(.caption)
-                        .foregroundStyle(.green)
-                case .accessDenied:
-                    Label("Keychain access denied", systemImage: "exclamationmark.shield.fill")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                case .notSet:
-                    Text("Not set")
                         .foregroundStyle(.tertiary)
+                } else {
+                    switch passwordStatus {
+                    case .stored:
+                        Label("Stored in \(credentialStore.displayName)", systemImage: "lock.shield.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    case .accessDenied:
+                        Label("Keychain access denied", systemImage: "exclamationmark.shield.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    case .notSet:
+                        Text("Not set")
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
 
@@ -218,8 +230,11 @@ struct ProfileDetailView: View {
     }
 
     private func refreshHasStoredPassword() {
+        // No point querying a store that persists nothing — the "storage
+        // disabled" caption is rendered directly from `credentialStore.persists`.
+        guard credentialStore.persists else { return }
         do {
-            if try KeychainStore.shared.password(for: profile.id) != nil {
+            if try credentialStore.secret(.password, for: profile.id) != nil {
                 passwordStatus = .stored
             } else {
                 passwordStatus = .notSet

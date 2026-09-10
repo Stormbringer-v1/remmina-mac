@@ -33,6 +33,14 @@ struct MainView: View {
     @State private var validationError: String?
     @State private var showingValidationError = false
 
+    /// The active credential store. Read directly from `SecuritySettings`
+    /// (not `@Environment`, since this view is where the environment value
+    /// for descendants — `ProfileEditView`, `ProfileDetailView` — is set)
+    /// so it's always current: it's a computed property, not cached, and
+    /// this read happening during body evaluation makes `body` re-run
+    /// (via Observation) whenever the backend setting changes.
+    private var credentialStore: CredentialStore { SecuritySettings.shared.activeCredentialStore }
+
     enum FilterMode: String, CaseIterable {
         case all = "All"
         case favorites = "Favorites"
@@ -63,6 +71,7 @@ struct MainView: View {
             }
         }
         .searchable(text: $searchText, prompt: "Search profiles (⌘F)")
+        .environment(\.credentialStore, credentialStore)
         .onAppear {
             profileStore = ProfileStore(modelContext: modelContext)
             // Auto-connect profiles marked "Connect on open"
@@ -86,8 +95,10 @@ struct MainView: View {
                 do {
                     try profileStore?.add(profile)
                     if let password = password, !password.isEmpty {
-                        if !KeychainStore.shared.savePassword(password, for: profile.id) {
-                            validationError = "Unable to save password to Keychain. Check System Settings → Privacy & Security."
+                        do {
+                            try credentialStore.save(password, kind: .password, for: profile.id)
+                        } catch {
+                            validationError = "Unable to save password to \(credentialStore.displayName). Check System Settings → Privacy & Security."
                             showingValidationError = true
                         }
                     }
@@ -113,11 +124,16 @@ struct MainView: View {
                     // Password is only saved if the user actually changed it
                     // (tracked by passwordDirty flag in ProfileEditView)
                     if let password = password {
-                        if password.isEmpty {
-                            // User explicitly cleared the password
-                            KeychainStore.shared.deletePassword(for: editedProfile.id)
-                        } else {
-                            _ = KeychainStore.shared.updatePassword(password, for: editedProfile.id)
+                        do {
+                            if password.isEmpty {
+                                // User explicitly cleared the password
+                                try credentialStore.delete(.password, for: editedProfile.id)
+                            } else {
+                                try credentialStore.save(password, kind: .password, for: editedProfile.id)
+                            }
+                        } catch {
+                            validationError = "Unable to update password in \(credentialStore.displayName). Check System Settings → Privacy & Security."
+                            showingValidationError = true
                         }
                     }
                     // password == nil means user didn't touch the password field
@@ -275,6 +291,9 @@ struct MainView: View {
         case .keychainFailed(let status):
             validationError = KeychainError.unexpectedStatus(status).localizedDescription
             showingValidationError = true
+        case .credentialUnavailable(let reason):
+            validationError = reason
+            showingValidationError = true
         }
     }
 
@@ -286,7 +305,7 @@ struct MainView: View {
 
     /// Actually performs the deletion after user confirms
     private func performDelete(_ profile: ConnectionProfile) {
-        KeychainStore.shared.deletePassword(for: profile.id)
+        try? credentialStore.deleteAll(for: profile.id)
         if selectedProfile?.id == profile.id {
             selectedProfile = nil
         }
@@ -309,6 +328,8 @@ struct MainView: View {
                 failures.append((profile.name, reason))
             case .keychainFailed(let status):
                 failures.append((profile.name, KeychainError.unexpectedStatus(status).localizedDescription))
+            case .credentialUnavailable(let reason):
+                failures.append((profile.name, reason))
             }
         }
         if connectedCount > 0 {

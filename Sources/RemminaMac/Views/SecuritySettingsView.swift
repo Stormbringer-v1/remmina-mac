@@ -50,8 +50,21 @@ struct SecuritySettingsView: View {
             } header: {
                 Text("RDP")
             }
+
+            Section {
+                Picker("Store passwords using", selection: $settings.credentialBackend) {
+                    ForEach(SecuritySettings.CredentialBackend.allCases) { backend in
+                        Text(backend.displayName).tag(backend)
+                    }
+                }
+                Text("\"None\" (the default) saves nothing — RemminaMac isn't tied to any one storage backend. SSH keeps working via SSH keys or ssh-agent, but VNC and RDP profiles that need a password can't connect until you choose Keychain. \"macOS Keychain\" saves passwords on this Mac only, protected by the system keychain.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Credential Storage")
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 480, height: 420)
+        .frame(width: 480, height: 460)
     }
 }
