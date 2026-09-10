@@ -2,7 +2,8 @@ import Testing
 import Foundation
 @testable import RemminaMac
 
-@Suite("RDP Argument Construction Tests")
+
+@Suite("RDP Argument Construction Tests", .serialized)
 struct RDPArgumentsTests {
 
     @Test("RDP argv builder defaults to /cert:tofu and -clipboard")
@@ -97,7 +98,7 @@ struct RDPArgumentsTests {
         // this, echoEnabled() could still read `true` (or transiently succeed
         // for the wrong reason) and the assertions below wouldn't discriminate
         // between "gated correctly" and "gated shut for an unrelated reason."
-        let echoDeadline = Date().addingTimeInterval(3.0)
+        let echoDeadline = Date().addingTimeInterval(3.0 * ciDeadlineScale)
         var echoOff = false
         while Date() < echoDeadline {
             if session.pty.echoEnabled() == false { echoOff = true; break }
@@ -144,7 +145,7 @@ struct RDPArgumentsTests {
             session.pty.closeMaster()
         }
 
-        let echoOnDeadline = Date().addingTimeInterval(3.0)
+        let echoOnDeadline = Date().addingTimeInterval(3.0 * ciDeadlineScale)
         var echoOn = false
         while Date() < echoOnDeadline {
             if session.pty.echoEnabled() == true { echoOn = true; break }
@@ -187,7 +188,7 @@ struct RDPArgumentsTests {
         // own reading path (not just PTYProcess in isolation).
         session.startReading()
 
-        let exitDeadline = Date().addingTimeInterval(5.0)
+        let exitDeadline = Date().addingTimeInterval(5.0 * ciDeadlineScale)
         while exited.value == 0 && Date() < exitDeadline {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
@@ -223,7 +224,7 @@ struct RDPArgumentsTests {
         session.xfreerdpLocator = { "/usr/bin/yes" }
 
         func waitForLaunch() async -> Int32? {
-            let deadline = Date().addingTimeInterval(6.0)
+            let deadline = Date().addingTimeInterval(6.0 * ciDeadlineScale)
             while Date() < deadline {
                 let fd = session.pty.masterFD
                 if fd >= 0 { return fd }
@@ -253,7 +254,7 @@ struct RDPArgumentsTests {
         let firstPty = ObjectIdentifier(ptyA)
 
         session.reconnect() // disconnect() (synchronous teardown) then connect() after a 0.5s delay
-        #expect(await waitForClose(fd1, timeout: 0.4),
+        #expect(await waitForClose(fd1, timeout: 0.4 * ciDeadlineScale),
                 "run 1's masterFD (\(fd1)) must be closed by disconnect(), not left open across reconnect")
 
         guard let fd2 = await waitForLaunch() else {
@@ -278,7 +279,7 @@ struct RDPArgumentsTests {
         #expect(session.status == statusBeforeStaleExit, "a stale exit callback from a superseded run must not change current status")
 
         session.reconnect()
-        #expect(await waitForClose(fd2, timeout: 0.4),
+        #expect(await waitForClose(fd2, timeout: 0.4 * ciDeadlineScale),
                 "run 2's masterFD (\(fd2)) must be closed by disconnect(), not left open across reconnect")
 
         guard let fd3 = await waitForLaunch() else {
@@ -289,7 +290,7 @@ struct RDPArgumentsTests {
         #expect(secondPty != thirdPty, "each reconnect must assign a fresh PTYProcess")
 
         session.disconnect()
-        #expect(await waitForClose(fd3, timeout: 3.0), "final run's masterFD should be closed after disconnect")
+        #expect(await waitForClose(fd3, timeout: 3.0 * ciDeadlineScale), "final run's masterFD should be closed after disconnect")
     }
 
     // MARK: - ISSUE-032: connect() must not assume main-thread isolation
@@ -309,7 +310,7 @@ struct RDPArgumentsTests {
             sem.signal()
         }
 
-        #expect(sem.wait(timeout: .now() + 2) == .success, "connect() must return without trapping when called off-main")
+        #expect(sem.wait(timeout: guardDeadline(2)) == .success, "connect() must return without trapping when called off-main")
     }
 
     // MARK: - ISSUE-006: injectable xfreerdp lookup, no unbounded blocking
@@ -337,7 +338,7 @@ struct RDPArgumentsTests {
         session.connect()
 
         var reachedError = false
-        let boundNanos: UInt64 = 4_000_000_000
+        let boundNanos = UInt64(4_000_000_000 * ciDeadlineScale)
         while DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds < boundNanos {
             if case .error = session.status {
                 reachedError = true

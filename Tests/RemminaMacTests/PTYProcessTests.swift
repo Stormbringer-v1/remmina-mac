@@ -14,7 +14,8 @@ import Foundation
 ///   6. Multiple launches on the same instance are rejected;
 ///   7. Inherited file descriptors other than 0, 1, 2 are closed on exec;
 ///   8. Non-blocking write handling and large write integrity.
-@Suite("PTYProcess behavior")
+
+@Suite("PTYProcess behavior", .serialized)
 struct PTYProcessTests {
 
     /// Thread-safe one-shot box for capturing values.
@@ -57,8 +58,8 @@ struct PTYProcessTests {
                            eofSem.signal()
                        })
 
-        _ = sem.wait(timeout: .now() + 10)
-        _ = eofSem.wait(timeout: .now() + 5)
+        _ = sem.wait(timeout: guardDeadline(10))
+        _ = eofSem.wait(timeout: guardDeadline(5))
         #expect(code.get() == 0, "`tty` should exit 0")
 
         let text = String(data: outputBox.get(), encoding: .utf8) ?? ""
@@ -84,7 +85,7 @@ struct PTYProcessTests {
 
         pty.terminate()
 
-        let fired = sem.wait(timeout: .now() + 5)
+        let fired = sem.wait(timeout: guardDeadline(5))
         #expect(fired == .success, "onExit must fire after terminate()")
 
         var status: Int32 = 0
@@ -110,13 +111,13 @@ struct PTYProcessTests {
         // Wait for stty -echo to take effect (poll up to 2s under load)
         let start = CFAbsoluteTimeGetCurrent()
         var echoState = pty.echoEnabled()
-        while echoState != false && (CFAbsoluteTimeGetCurrent() - start) < 2.0 {
+        while echoState != false && (CFAbsoluteTimeGetCurrent() - start) < (2.0 * ciDeadlineScale) {
             usleep(20_000)
             echoState = pty.echoEnabled()
         }
         #expect(echoState == false, "echoEnabled() should return false when stty -echo has run")
 
-        _ = sem.wait(timeout: .now() + 3)
+        _ = sem.wait(timeout: guardDeadline(3))
         pty.closeMaster()
 
         #expect(pty.echoEnabled() == nil, "echoEnabled() should return nil when master is closed")
@@ -143,8 +144,8 @@ struct PTYProcessTests {
             eofSem.signal()
         })
 
-        _ = exitSem.wait(timeout: .now() + 2)
-        _ = eofSem.wait(timeout: .now() + 2)
+        _ = exitSem.wait(timeout: guardDeadline(2))
+        _ = eofSem.wait(timeout: guardDeadline(2))
 
         // Count invocations over 500 ms
         usleep(500_000)
@@ -175,7 +176,7 @@ struct PTYProcessTests {
         // Terminate with 1s grace period for test speed
         pty.terminate(gracePeriod: 1.0)
 
-        let fired = sem.wait(timeout: .now() + 5)
+        let fired = sem.wait(timeout: guardDeadline(5))
         #expect(fired == .success, "onExit must fire within 5s following SIGKILL escalation")
 
         var status: Int32 = 0
@@ -205,7 +206,7 @@ struct PTYProcessTests {
         }
 
         pty.terminate()
-        _ = sem.wait(timeout: .now() + 2)
+        _ = sem.wait(timeout: guardDeadline(2))
         pty.closeMaster()
     }
 
@@ -227,7 +228,7 @@ struct PTYProcessTests {
             if n > 0 { out.append(buffer, count: n) } else { break }
         }
         let output = String(data: out, encoding: .utf8) ?? ""
-        _ = sem.wait(timeout: .now() + 3)
+        _ = sem.wait(timeout: guardDeadline(3))
         pty.closeMaster()
 
         // /dev/fd will list 0, 1, 2, and up to 2 descriptors opened by ls itself (cwd and dirfd)
@@ -259,7 +260,7 @@ struct PTYProcessTests {
         #expect(elapsed < 0.050, "pty.write(256 KiB) must return in under 50ms; took \(elapsed)s")
 
         pty.terminate()
-        _ = sem.wait(timeout: .now() + 2)
+        _ = sem.wait(timeout: guardDeadline(2))
         pty.closeMaster()
     }
 
@@ -296,7 +297,7 @@ struct PTYProcessTests {
 
         // Allow some time for drain to settle
         let start = CFAbsoluteTimeGetCurrent()
-        while readDataBox.get().count < expectedSize && (CFAbsoluteTimeGetCurrent() - start) < 5.0 {
+        while readDataBox.get().count < expectedSize && (CFAbsoluteTimeGetCurrent() - start) < (5.0 * ciDeadlineScale) {
             usleep(10_000)
         }
 
@@ -307,7 +308,7 @@ struct PTYProcessTests {
         #expect(matches, "Data read back must match data written")
 
         pty.terminate()
-        _ = exitSem.wait(timeout: .now() + 2)
+        _ = exitSem.wait(timeout: guardDeadline(2))
         pty.closeMaster()
     }
 
@@ -352,8 +353,8 @@ struct PTYProcessTests {
         // Kill the child; master sees EOF/HUP on the next read.
         pty.terminate(gracePeriod: 5)
 
-        _ = exitSem.wait(timeout: .now() + 5)
-        _ = eofSem.wait(timeout: .now() + 5)
+        _ = exitSem.wait(timeout: guardDeadline(5))
+        _ = eofSem.wait(timeout: guardDeadline(5))
         // Let the EOF handler's ioQueue.sync teardown finish.
         usleep(150_000)
 
@@ -387,8 +388,8 @@ struct PTYProcessTests {
         #expect(childPid > 0)
         kill(childPid, SIGKILL) // kill the child directly, not via terminate()
 
-        _ = exitSem.wait(timeout: .now() + 5)
-        _ = eofSem.wait(timeout: .now() + 5)
+        _ = exitSem.wait(timeout: guardDeadline(5))
+        _ = eofSem.wait(timeout: guardDeadline(5))
         usleep(150_000)
 
         #expect(pty.hasArmedWriteSource == false, "no write source should remain armed after the child is killed and EOF is observed")
