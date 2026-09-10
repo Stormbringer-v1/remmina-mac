@@ -105,9 +105,33 @@ echo ""
 
 # Step 5: Code sign (ad-hoc for local use)
 echo "🔏 Step 5/5: Code signing (ad-hoc)..."
-SIGN_FLAGS=(--force --deep --sign -)
+# Identity: honour CODESIGN_IDENTITY if the caller has a real Developer ID,
+# otherwise fall back to ad-hoc ("-").
+SIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+SIGN_FLAGS=(--force --deep --sign "$SIGN_IDENTITY")
+
 if [ -f "$RESOURCES_DIR/RemminaMac.entitlements" ]; then
-    SIGN_FLAGS+=(--entitlements "$RESOURCES_DIR/RemminaMac.entitlements")
+    ENTITLEMENTS_TO_USE="$RESOURCES_DIR/RemminaMac.entitlements"
+
+    if [ "$SIGN_IDENTITY" = "-" ]; then
+        # The entitlements file declares a keychain access group prefixed with
+        # $(AppIdentifierPrefix). That is an Xcode build variable; codesign does
+        # NOT substitute it, so an ad-hoc build would ship the literal string as
+        # its entitlement value. A keychain-access-group with no valid team
+        # prefix is rejected by the kernel at spawn time, and the app fails to
+        # launch with "Launchd job spawn failed" / "can't be opened".
+        #
+        # The access group is inert without a Team ID anyway — Keychain falls
+        # back to the binary's own default access group — so strip the key for
+        # ad-hoc builds and keep the file intact for real Developer ID signing.
+        ENTITLEMENTS_TO_USE="$BUILD_DIR/RemminaMac-adhoc.entitlements"
+        cp "$RESOURCES_DIR/RemminaMac.entitlements" "$ENTITLEMENTS_TO_USE"
+        /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" \
+            "$ENTITLEMENTS_TO_USE" >/dev/null 2>&1 || true
+        echo "   Ad-hoc build: keychain-access-groups stripped (needs a Team ID)"
+    fi
+
+    SIGN_FLAGS+=(--entitlements "$ENTITLEMENTS_TO_USE")
 fi
 codesign "${SIGN_FLAGS[@]}" "$BUNDLE_DIR" 2>&1 || {
     echo "⚠️  Code signing failed (app will still work locally)"
