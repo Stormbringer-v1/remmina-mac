@@ -259,20 +259,52 @@ final class RDPSession: SessionProtocol {
     /// bounded by `whichTimeoutSeconds` (ISSUE-006). Static/injectable so tests
     /// can substitute a locator that returns nil immediately.
     static func defaultLocator() -> String? {
-        let paths = [
-            "/opt/homebrew/bin/xfreerdp",
-            "/opt/homebrew/bin/xfreerdp3",
-            "/usr/local/bin/xfreerdp",
-            "/usr/local/bin/xfreerdp3",
+        // FreeRDP 3 ships several clients. On macOS the SDL client draws
+        // natively; the X11 client (`xfreerdp`) needs XQuartz AND a $DISPLAY,
+        // and without one it dies with SIGFPE after logging
+        // "xf_setup_x11: failed to open display" — surfacing to the user as
+        // "xfreerdp exited with code 136 before authenticating", which points
+        // at credentials when the real cause is a missing display. So prefer
+        // the SDL clients, and only consider the X11 clients when $DISPLAY is
+        // actually set.
+        let nativePaths = [
+            "/opt/homebrew/bin/sdl-freerdp3",
+            "/opt/homebrew/bin/sdl-freerdp",
+            "/usr/local/bin/sdl-freerdp3",
+            "/usr/local/bin/sdl-freerdp",
         ]
-        for path in paths where FileManager.default.isExecutableFile(atPath: path) {
-            AppLogger.shared.log("RDP: Found xfreerdp at \(path)")
+        let x11Paths = [
+            "/opt/homebrew/bin/xfreerdp3",
+            "/opt/homebrew/bin/xfreerdp",
+            "/usr/local/bin/xfreerdp3",
+            "/usr/local/bin/xfreerdp",
+        ]
+
+        for path in nativePaths where FileManager.default.isExecutableFile(atPath: path) {
+            AppLogger.shared.log("RDP: Using native FreeRDP client at \(path)")
             return path
+        }
+
+        let hasDisplay = !(ProcessInfo.processInfo.environment["DISPLAY"] ?? "").isEmpty
+        if hasDisplay {
+            for path in x11Paths where FileManager.default.isExecutableFile(atPath: path) {
+                AppLogger.shared.log("RDP: Using X11 FreeRDP client at \(path) (DISPLAY is set)")
+                return path
+            }
+        } else {
+            let x11Present = x11Paths.contains { FileManager.default.isExecutableFile(atPath: $0) }
+            if x11Present {
+                AppLogger.shared.log(
+                    "RDP: Only the X11 FreeRDP client is installed and $DISPLAY is unset. "
+                    + "Install the native client (brew install freerdp provides sdl-freerdp) "
+                    + "or start XQuartz.",
+                    level: .warning)
+            }
         }
 
         let whichProc = Process()
         whichProc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        whichProc.arguments = ["xfreerdp"]
+        whichProc.arguments = ["sdl-freerdp"]
         let pipe = Pipe()
         whichProc.standardOutput = pipe
         whichProc.standardError = FileHandle.nullDevice
