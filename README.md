@@ -79,6 +79,36 @@ RemminaMac is a powerful, native macOS remote connection manager inspired by the
    ```
    Or select the `RemminaMac` scheme in Xcode and press <kbd>⌘</kbd> + <kbd>R</kbd>.
 
+   `swift run` is convenient for development, but it runs the binary directly
+   rather than as a bundled macOS application — there is no icon, no Dock
+   identity, and the app cannot be launched from Finder or Spotlight.
+
+### Installing as a real macOS app
+
+To build a proper `.app` bundle and install it:
+
+```bash
+./build_app.sh
+cp -r dist/RemminaMac.app /Applications/
+```
+
+`build_app.sh` compiles a release binary, assembles the bundle, generates the
+icon set from `Resources/AppIcon.png`, applies the entitlements, stamps the
+build number from the commit count, and ad-hoc code signs the result. It
+prints the version it produced, for example `Version: 0.9.0 (build 38)`.
+
+> [!IMPORTANT]
+> **First launch will be blocked by Gatekeeper.** The bundle is ad-hoc signed,
+> not signed with an Apple Developer ID and not notarized, so macOS refuses to
+> open it normally. To run it anyway, either right-click the app and choose
+> **Open** (then confirm), or clear the quarantine flag:
+> ```bash
+> xattr -dr com.apple.quarantine /Applications/RemminaMac.app
+> ```
+> A consequence of ad-hoc signing is that the code identity changes on every
+> build, so macOS treats each build as a different application and will prompt
+> for Keychain access again after an update.
+
 ---
 
 ## 🧪 Testing
