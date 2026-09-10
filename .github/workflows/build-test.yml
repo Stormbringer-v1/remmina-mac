@@ -8,23 +8,39 @@ on:
 
 jobs:
   build-test:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 20
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The test target uses Swift Testing (Swift 6.0+ / Xcode 16+) and
-      # SwiftTerm's manifest also needs a recent toolchain. Select the newest
-      # installed Xcode 16 explicitly rather than relying on the runner default,
-      # which has historically been an older Xcode on the macos-14 image.
-      - name: Select Xcode 16
+      # Toolchain floor is Swift 6.1, for two independent reasons:
+      #   * the test target uses Swift Testing (6.0+), and
+      #   * SwiftTerm 1.10.1's Package.swift has a trailing comma in an
+      #     argument list, which only parses from Swift 6.1 (SE-0439). On an
+      #     older toolchain dependency resolution dies with
+      #     "Invalid manifest ... unexpected ',' separator" before any of our
+      #     code is compiled.
+      # Select the newest installed Xcode rather than pinning a version, then
+      # assert the floor so a runner-image change fails loudly and specifically
+      # instead of resurfacing as a confusing manifest parse error.
+      - name: Select newest Xcode and verify toolchain
         run: |
-          XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           if [ -n "$XCODE" ]; then sudo xcode-select -s "$XCODE"; fi
           xcodebuild -version
           swift --version
+
+          SWIFT_VER=$(swift --version 2>&1 | grep -oE 'Apple Swift version [0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+' | head -1)
+          MAJOR=${SWIFT_VER%%.*}
+          MINOR=${SWIFT_VER##*.}
+          if [ "$MAJOR" -lt 6 ] || { [ "$MAJOR" -eq 6 ] && [ "$MINOR" -lt 1 ]; }; then
+            echo "::error::Swift $SWIFT_VER is too old. This project needs Swift 6.1+ (SwiftTerm 1.10.1's manifest uses a trailing comma, SE-0439). Available Xcodes:"
+            ls -d /Applications/Xcode_*.app || true
+            exit 1
+          fi
+          echo "Swift $SWIFT_VER satisfies the 6.1 floor."
 
       # PROBLEMS.md ISSUE-030: fail CI on any new warning. Scoped to the
       # `swift build` step only (the main RemminaMac target, currently
