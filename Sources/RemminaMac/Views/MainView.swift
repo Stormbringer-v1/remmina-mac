@@ -97,6 +97,9 @@ struct MainView: View {
                     if let password = password, !password.isEmpty {
                         do {
                             try credentialStore.save(password, kind: .password, for: profile.id)
+                        } catch EncryptedStoreError.locked {
+                            validationError = "The profile was saved, but its password was not: the encrypted credential store is locked. Unlock it in Settings → Security, then edit this profile to re-enter the password."
+                            showingValidationError = true
                         } catch {
                             validationError = "Unable to save password to \(credentialStore.displayName). Check System Settings → Privacy & Security."
                             showingValidationError = true
@@ -294,6 +297,9 @@ struct MainView: View {
         case .credentialUnavailable(let reason):
             validationError = reason
             showingValidationError = true
+        case .storeLocked(let reason):
+            validationError = reason
+            showingValidationError = true
         }
     }
 
@@ -329,6 +335,8 @@ struct MainView: View {
             case .keychainFailed(let status):
                 failures.append((profile.name, KeychainError.unexpectedStatus(status).localizedDescription))
             case .credentialUnavailable(let reason):
+                failures.append((profile.name, reason))
+            case .storeLocked(let reason):
                 failures.append((profile.name, reason))
             }
         }

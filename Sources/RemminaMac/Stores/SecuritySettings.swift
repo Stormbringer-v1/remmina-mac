@@ -95,6 +95,7 @@ extension SecuritySettings {
     enum CredentialBackend: String, CaseIterable, Hashable, Identifiable {
         case none
         case keychain
+        case encryptedFile
 
         var id: String { rawValue }
 
@@ -103,10 +104,17 @@ extension SecuritySettings {
         /// immutable service name, so a fresh instance targeting the
         /// production service behaves identically to a shared one — this
         /// avoids a Sources-wide dependency on the singleton.
+        ///
+        /// `EncryptedFileCredentialStore.shared` is different: it holds the
+        /// derived key in memory for the app run. A fresh instance per call
+        /// (like `KeychainStore()`) would throw that key away between
+        /// calls and leave the store permanently re-locking itself, so this
+        /// case must resolve to the singleton.
         var store: CredentialStore {
             switch self {
             case .none: return NullCredentialStore.shared
             case .keychain: return KeychainStore()
+            case .encryptedFile: return EncryptedFileCredentialStore.shared
             }
         }
 

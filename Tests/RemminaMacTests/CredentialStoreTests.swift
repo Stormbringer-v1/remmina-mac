@@ -170,6 +170,39 @@ struct CredentialStoreTests {
         #expect(created.count == 1)
     }
 
+    @Test("openSession returns .storeLocked (not .keychainFailed) when the store throws EncryptedStoreError.locked, for both VNC and SSH profiles")
+    @MainActor
+    func testStoreThrowingLockedProducesStoreLocked() throws {
+        let fakeStore = FakeCredentialStore(persists: true)
+        fakeStore.throwOnSecret = EncryptedStoreError.locked
+
+        var created: [FakeSession] = []
+        let manager = withUnsafeMutablePointer(to: &created) { ptr in
+            makeConnectionManager(credentialStore: fakeStore, createdSessions: ptr)
+        }
+
+        let vncProfile = ConnectionProfile(name: "LockedVNC", protocolType: .vnc, host: "192.0.2.7", port: 5900)
+        let vncResult = manager.openSession(for: vncProfile)
+
+        guard case .storeLocked(let reason) = vncResult else {
+            Issue.record("expected .storeLocked for a VNC profile against a locked store, got \(vncResult)")
+            return
+        }
+        #expect(!reason.isEmpty)
+        if case .keychainFailed = vncResult {
+            Issue.record("a locked EncryptedFileCredentialStore must not be reported as .keychainFailed — that tells the user the wrong thing (Keychain error vs. 'unlock the store')")
+        }
+
+        let sshProfile = ConnectionProfile(name: "LockedSSH", protocolType: .ssh, host: "192.0.2.8", port: 22)
+        let sshResult = manager.openSession(for: sshProfile)
+        guard case .storeLocked = sshResult else {
+            Issue.record("expected .storeLocked for an SSH profile too — the store read fails before protocol-specific logic runs, got \(sshResult)")
+            return
+        }
+
+        #expect(created.isEmpty, "no session/tab should be created while the credential store is locked")
+    }
+
     // MARK: - KeychainStore round-trips through the CredentialStore protocol
 
     private func makeKeychainStore(label: String) -> KeychainStore {

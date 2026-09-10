@@ -5,6 +5,17 @@ import SwiftUI
 /// Extensible: a passphrase kind (for SSH key passphrases) is planned.
 enum SecretKind: Sendable {
     case password
+
+    /// Stable string used to build the `"<profileUUID>.<secretKind>"`
+    /// storage key in file-based backends (`EncryptedFileCredentialStore`).
+    /// Deliberately not derived from the case name via `String(describing:)`
+    /// or similar reflection — a future case rename would silently change
+    /// every stored key and orphan existing secrets.
+    var storageKey: String {
+        switch self {
+        case .password: return "password"
+        }
+    }
 }
 
 /// Abstraction over where per-profile secrets (passwords, and in future

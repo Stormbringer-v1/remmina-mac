@@ -7,6 +7,7 @@ import SwiftUI
 /// turns them on when they want them.
 struct SecuritySettingsView: View {
     @Bindable private var settings = SecuritySettings.shared
+    @State private var showingEncryptedStoreSheet = false
 
     var body: some View {
         Form {
@@ -57,14 +58,45 @@ struct SecuritySettingsView: View {
                         Text(backend.displayName).tag(backend)
                     }
                 }
-                Text("\"None\" (the default) saves nothing — RemminaMac isn't tied to any one storage backend. SSH keeps working via SSH keys or ssh-agent, but VNC and RDP profiles that need a password can't connect until you choose Keychain. \"macOS Keychain\" saves passwords on this Mac only, protected by the system keychain.")
+                .onChange(of: settings.credentialBackend) { _, newValue in
+                    if newValue == .encryptedFile && !EncryptedFileCredentialStore.shared.isUnlocked {
+                        showingEncryptedStoreSheet = true
+                    }
+                }
+                Text("\"None\" (the default) saves nothing — RemminaMac isn't tied to any one storage backend. SSH keeps working via SSH keys or ssh-agent, but VNC and RDP profiles that need a password can't connect until you choose Keychain or Encrypted file. \"macOS Keychain\" saves passwords on this Mac only, protected by the system keychain. \"Encrypted file (portable)\" encrypts secrets with a passphrase you choose, stored in a file on this machine — it depends on no OS keychain, so it works the same on a future Linux/Windows build; if the passphrase is lost, the stored secrets cannot be recovered.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if settings.credentialBackend == .encryptedFile {
+                    HStack {
+                        Image(systemName: EncryptedFileCredentialStore.shared.isUnlocked ? "lock.open" : "lock")
+                            .foregroundStyle(EncryptedFileCredentialStore.shared.isUnlocked ? .green : .secondary)
+                        Text(EncryptedFileCredentialStore.shared.isUnlocked ? "Unlocked for this session" : "Locked")
+                        Spacer()
+                        Button(unlockButtonTitle) {
+                            if EncryptedFileCredentialStore.shared.isUnlocked {
+                                EncryptedFileCredentialStore.shared.lock()
+                            } else {
+                                showingEncryptedStoreSheet = true
+                            }
+                        }
+                    }
+                }
             } header: {
                 Text("Credential Storage")
             }
         }
         .formStyle(.grouped)
         .frame(width: 480, height: 460)
+        .sheet(isPresented: $showingEncryptedStoreSheet) {
+            EncryptedStorePassphraseView(store: EncryptedFileCredentialStore.shared) { _ in
+                showingEncryptedStoreSheet = false
+            }
+        }
+    }
+
+    private var unlockButtonTitle: String {
+        if EncryptedFileCredentialStore.shared.isUnlocked { return "Lock" }
+        return EncryptedFileCredentialStore.shared.fileExists ? "Unlock" : "Create"
     }
 }

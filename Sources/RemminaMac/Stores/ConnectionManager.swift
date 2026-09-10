@@ -109,6 +109,13 @@ final class ConnectionManager: SessionDelegate {
         /// deep inside `VNCSession`/`RDPSession`. A per-session password
         /// prompt is a planned follow-up, not implemented yet.
         case credentialUnavailable(String)
+        /// The active `CredentialStore` is `EncryptedFileCredentialStore`
+        /// and it is locked (no passphrase entered this run). Distinct from
+        /// `.credentialUnavailable`: here a secret may well be saved, the
+        /// user just needs to unlock the store — telling them "no password
+        /// saved" (the credentialUnavailable message) would be actively
+        /// wrong.
+        case storeLocked(String)
     }
 
     /// Opens a new session for the given profile.
@@ -151,6 +158,10 @@ final class ConnectionManager: SessionDelegate {
         } catch KeychainError.unexpectedStatus(let status) {
             AppLogger.shared.log("Connection aborted: Keychain read failed for \(profile.name) — status \(status)", level: .error)
             return .keychainFailed(status)
+        } catch EncryptedStoreError.locked {
+            let message = "Credential storage (Encrypted file) is locked. Unlock it in Settings → Security, then try again."
+            AppLogger.shared.log("Connection aborted: \(profile.name) needs the encrypted credential store unlocked first", level: .error)
+            return .storeLocked(message)
         } catch {
             AppLogger.shared.log("Connection aborted: Keychain read failed for \(profile.name) — \(error.localizedDescription)", level: .error)
             return .keychainFailed(errSecIO)
