@@ -140,6 +140,31 @@ final class RDPSession: SessionProtocol {
         pty.write(data)
     }
 
+    // MARK: - Sleep/wake health probe (ISSUE-027c, additive only)
+
+    /// Read-only liveness signal for `ConnectionManager.probeSessionHealth()`.
+    /// True while the child xfreerdp process still exists (`kill(pid, 0)`
+    /// succeeds); false when it was never launched, handed off to Microsoft
+    /// Remote Desktop, or has been terminated. This only proves the process
+    /// is alive, not that the TCP connection survived sleep — a live-but-
+    /// broken connection is still caught by the PTY EOF/exit handlers.
+    var isProcessAlive: Bool {
+        let childPid = pty.pid
+        guard childPid > 0 else { return false }
+        return kill(childPid, 0) == 0
+    }
+
+    /// Marks a `.connected` session whose child died across sleep as lost.
+    /// Tears down the PTY, then surfaces `.error` (instead of a silent
+    /// `.disconnected`) so the tab shows what happened. No-op unless the
+    /// session is `.connected`. Safe from any thread: `status`'s `didSet`
+    /// already bounces the delegate callback to the main queue.
+    func markConnectionLost() {
+        guard status == .connected else { return }
+        cleanupAllResources()
+        status = .error("Connection lost during sleep")
+    }
+
     // MARK: - Timers
 
     private func startConnectionTimeout() {

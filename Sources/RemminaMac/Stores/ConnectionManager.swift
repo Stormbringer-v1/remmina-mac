@@ -195,22 +195,50 @@ final class ConnectionManager: SessionDelegate {
         needsHealthCheck = true
     }
 
-    /// Probes all active sessions after system wake.
-    /// Sessions that have silently died are marked as disconnected.
+    /// Probes all sessions that were `.connected` across a sleep/wake cycle.
+    ///
+    /// Per-protocol liveness (ISSUE-027c):
+    /// - SSH/RDP: the child (`ssh`/`xfreerdp`) may have died while the
+    ///   machine slept. `isProcessAlive` (`kill(pid, 0)`) detects that;
+    ///   dead sessions are torn down and marked
+    ///   `.error("Connection lost during sleep")` so the tab says what
+    ///   happened instead of silently going stale. A child that survived
+    ///   sleep with a broken TCP connection underneath is still caught by
+    ///   ssh's keepalive (`ServerAliveInterval=30`) and the PTY EOF/exit
+    ///   handlers.
+    /// - VNC: owns no child process, so there is nothing synchronous to
+    ///   probe from here. The session's own `status` is the running flag
+    ///   we read; a still-`.connected` VNC session is left for its read
+    ///   loop, which fails stuck connections via its read deadline.
+    ///
+    /// Sessions whose concrete type exposes no liveness signal (e.g. test
+    /// doubles) are left alone: without an observable signal, marking
+    /// them would be guessing.
     func probeSessionHealth() {
         guard needsHealthCheck else { return }
         needsHealthCheck = false
 
         for session in sessions {
-            if session.status == .connected {
-                // For SSH sessions, check if process is still running
-                if session is SSHSession {
-                    // The SSH keepalive (ServerAliveInterval=30) will detect dead
-                    // connections within 90s. After wake, give it a moment.
-                    AppLogger.shared.log("SSH: Health check for \(session.profileName) — keepalive will detect if dead")
+            guard session.status == .connected else { continue }
+            switch session.protocolType {
+            case .ssh:
+                guard let ssh = session as? SSHSession else { continue }
+                if ssh.isProcessAlive {
+                    AppLogger.shared.log("SSH: Health check passed for \(session.profileName) — process alive")
+                } else {
+                    ssh.markConnectionLost()
+                    AppLogger.shared.log("SSH: Health check failed for \(session.profileName) — marked as lost", level: .error)
                 }
-                // For VNC, the message loop will detect dead connections
-                // For RDP, the process termination handler will fire
+            case .rdp:
+                guard let rdp = session as? RDPSession else { continue }
+                if rdp.isProcessAlive {
+                    AppLogger.shared.log("RDP: Health check passed for \(session.profileName) — process alive")
+                } else {
+                    rdp.markConnectionLost()
+                    AppLogger.shared.log("RDP: Health check failed for \(session.profileName) — marked as lost", level: .error)
+                }
+            case .vnc:
+                AppLogger.shared.log("VNC: Health check for \(session.profileName) — still connected; read loop detects dead connections")
             }
         }
         updateDockBadge()

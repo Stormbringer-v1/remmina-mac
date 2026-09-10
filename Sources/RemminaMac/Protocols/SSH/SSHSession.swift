@@ -107,6 +107,33 @@ final class SSHSession: SessionProtocol {
         pty.resize(cols: cols, rows: rows)
     }
 
+    // MARK: - Sleep/wake health probe (ISSUE-027c, additive only)
+
+    /// Read-only liveness signal for `ConnectionManager.probeSessionHealth()`.
+    /// True while the child ssh process still exists (`kill(pid, 0)`
+    /// succeeds); false when it was never launched or has been terminated.
+    /// This only proves the process is alive, not that the TCP connection
+    /// survived sleep — a live-but-broken connection is still caught by
+    /// ssh's own keepalive (`ServerAliveInterval=30`) and the EOF handler.
+    var isProcessAlive: Bool {
+        let childPid = pty.pid
+        guard childPid > 0 else { return false }
+        return kill(childPid, 0) == 0
+    }
+
+    /// Marks a `.connected` session whose child died across sleep as lost.
+    /// Tears down the PTY, then surfaces `.error` (instead of a silent
+    /// `.disconnected`) so the tab shows what happened. No-op unless the
+    /// session is `.connected`. Call on the main thread:
+    /// `ConnectionManager.probeSessionHealth()` runs there via the wake
+    /// handler in `RemminaMacApp.AppDelegate`, matching every other direct
+    /// `status` assignment on this type.
+    func markConnectionLost() {
+        guard status == .connected else { return }
+        cleanupAllResources()
+        status = .error("Connection lost during sleep")
+    }
+
     // MARK: - Arguments Builder (ISSUE-001 & ISSUE-022)
 
     /// Pure function to build the command-line arguments for `/usr/bin/ssh`.

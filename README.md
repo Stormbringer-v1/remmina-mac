@@ -131,7 +131,7 @@ The macOS app sandbox is **not enabled** by default. Two architectural realities
 1. **`/usr/bin/ssh` needs to read and write the user's SSH config.** A sandboxed app cannot reach `~/.ssh/config` or `~/.ssh/known_hosts` without per-path entitlements.
 2. **RDP integrates with an externally installed `xfreerdp`** (FreeRDP). The sandbox blocks spawning of non-bundled, non-system executables on standard paths.
 
-The `Resources/RemminaMac.entitlements` file is included as a forward-looking starting point for users who want to opt into sandbox with appropriate exceptions (for example, a bundled helper tool for `xfreerdp`, and explicit `files.absolute-path.read-write` exceptions for `~/.ssh` and the credential pipe script directory). The build script applies this file via `codesign --entitlements` so what you ship matches the file on disk.
+The `Resources/RemminaMac.entitlements` file is included as a forward-looking starting point for users who want to opt into sandbox with appropriate exceptions (for example, a bundled helper tool for `xfreerdp`, and explicit `files.absolute-path.read-write` exceptions for `~/.ssh`). The build script applies this file via `codesign --entitlements` so what you ship matches the file on disk.
 
 Keychain access is independent of the sandbox — the `keychain-access-groups` entry declares the credential namespace regardless.
 

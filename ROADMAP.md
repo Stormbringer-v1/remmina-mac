@@ -16,13 +16,20 @@ expect rough edges on real servers until matured.
   recents.
 - macOS Keychain-backed credential storage. No plaintext on disk, no
   credentials in environment variables.
-- SSH terminal with a custom credential pipe (`ssh_askpass` workflow) so the
-  Keychain password is delivered in-memory only.
+- SSH terminal with PTY-write-on-prompt credential delivery: the child `ssh`
+  gets the PTY slave as its controlling terminal and prints its normal
+  `Password:` prompt there; the Keychain password is written to the PTY
+  in-memory, exactly once — no askpass helper, no on-disk artifact, and
+  nothing visible in `ps aux`.
 - Hostname validation that blocks SSRF-style encoded IP notation, command
   metacharacters, and (when opted in) loopback / private / metadata ranges.
 - Bounded per-session output buffers, maximum concurrent session cap,
   duplicate-session prevention, and dock badge reflecting active count.
-- Sleep/wake session handling with keepalive-driven health checking.
+- Sleep/wake session handling: after wake, each still-`.connected` session
+  is probed — SSH/RDP by child-process liveness (a dead child surfaces
+  `Connection lost during sleep`), VNC by its own read loop — while SSH
+  keepalive (`ServerAliveInterval=30`) catches connections whose process
+  survived but whose TCP did not.
 - Structured in-memory + on-disk logger with correlation IDs and rotation.
   Credentials are never logged.
 
@@ -37,7 +44,8 @@ expect rough edges on real servers until matured.
   released, so a process memory dump could in principle still contain an
   unflushed password. Mitigations in place: passwords are released
   immediately after their single use; SSH passwords are written to the
-  askpass pipe rather than passed as a `Process` argument.
+  PTY in response to the server's `Password:` prompt rather than passed
+  as a `Process` argument.
 - The macOS app sandbox can restrict spawning of non-bundled executables
   (`xfreerdp`). A small set of entitlement exceptions may be required when
   distributing; see the project's release notes for the current configuration.

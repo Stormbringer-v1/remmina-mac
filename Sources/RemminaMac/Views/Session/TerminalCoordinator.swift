@@ -36,8 +36,15 @@ class TerminalCoordinator: NSObject, SwiftTerm.TerminalViewDelegate {
         // This blocks the remote from invoking file://, ssh://, tel://, or
         // any custom x-callback-url scheme that another app may have
         // registered as a handler.
+        //
+        // `SecuritySettings` is `@MainActor`-isolated but SwiftTerm invokes
+        // this delegate off the main thread, so the read must hop to the
+        // main actor asynchronously. Asserting main-thread isolation here
+        // would trap on those background callbacks; `Task { @MainActor in
+        // ... }` never blocks, so it cannot deadlock when already on main
+        // either.
         guard let url = URL(string: link) else { return }
-        MainActor.assumeIsolated {
+        Task { @MainActor in
             guard SecuritySettings.shared.allowRemoteOpenLink else { return }
             guard SecuritySettings.isLinkSchemeAllowed(url) else {
                 AppLogger.shared.log("Terminal: refused remote open of \(url.scheme ?? "nil") URL", level: .warning)
@@ -58,7 +65,11 @@ class TerminalCoordinator: NSObject, SwiftTerm.TerminalViewDelegate {
         // hostile or compromised remote from silently replacing clipboard
         // contents (e.g. with a malicious URL the user later pastes into a
         // browser).
-        MainActor.assumeIsolated {
+        //
+        // Same isolation hop as `requestOpenLink` above: `SecuritySettings`
+        // is `@MainActor`-isolated, this delegate fires off-main, and an
+        // async `Task` hop neither traps nor deadlocks.
+        Task { @MainActor in
             guard SecuritySettings.shared.allowRemoteClipboard else { return }
             guard let str = String(data: content, encoding: .utf8) else { return }
             NSPasteboard.general.clearContents()
