@@ -7,6 +7,7 @@
     <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-5.9-F05138.svg?style=flat&logo=swift" alt="Swift 5.9" /></a>
     <a href="https://apple.com/macos"><img src="https://img.shields.io/badge/macOS-14.0+-000000.svg?style=flat&logo=apple" alt="macOS 14+" /></a>
     <a href="./LICENSES/"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat" alt="License MIT" /></a>
+    <a href="#"><img src="https://img.shields.io/badge/Version-0.9.0--beta-orange.svg?style=flat" alt="Version 0.9.0 beta" /></a>
     <a href="https://github.com/Stormbringer-v1/remmina-mac"><img src="https://img.shields.io/badge/Tests-156%20Passing-success.svg?style=flat" alt="Tests" /></a>
   </p>
 </div>
@@ -14,6 +15,12 @@
 <br/>
 
 RemminaMac is a powerful, native macOS remote connection manager inspired by the popular Linux tool [Remmina](https://remmina.org/). Built fully in **SwiftUI**, **SwiftData**, and leveraging the **macOS Keychain**, it provides a stunning, secure, and blazing-fast interface for managing remote connections.
+
+> [!WARNING]
+> **This is a 0.9.0 beta and is not production ready.** SSH, VNC, and RDP
+> connections have not yet been verified end to end against live servers, and
+> the automated suite is currently intermittent. Use it against hosts you can
+> afford to have a bad session with, and expect rough edges.
 
 > **Note:** RemminaMac is an independent project and is **not** affiliated with, sponsored by, or endorsed by the Remmina project. The name reflects shared inspiration only.
 

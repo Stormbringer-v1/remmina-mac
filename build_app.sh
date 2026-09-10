@@ -42,6 +42,17 @@ cp "$BINARY" "$BUNDLE_DIR/Contents/MacOS/${APP_NAME}"
 # Copy Info.plist
 cp "$RESOURCES_DIR/Info.plist" "$BUNDLE_DIR/Contents/Info.plist"
 
+# Stamp the build number from the commit count so every distributed build has a
+# strictly higher CFBundleVersion than the last. macOS uses this value to decide
+# whether an install is newer; a static value means an update may be ignored.
+# CFBundleShortVersionString (the human-facing "0.9.0") is left as authored.
+BUILD_NUMBER="$(git -C "$PROJECT_DIR" rev-list --count HEAD 2>/dev/null || echo 1)"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" \
+    "$BUNDLE_DIR/Contents/Info.plist" >/dev/null
+SHORT_VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+    "$BUNDLE_DIR/Contents/Info.plist")"
+echo "   Version: $SHORT_VERSION (build $BUILD_NUMBER)"
+
 # Write PkgInfo
 echo -n "APPL????" > "$BUNDLE_DIR/Contents/PkgInfo"
 
