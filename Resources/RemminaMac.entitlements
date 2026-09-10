@@ -6,9 +6,20 @@
     <true/>
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
+    <!--
+      Keychain access group. The $(AppIdentifierPrefix) is replaced at sign
+      time with the developer Team ID, which is required for the access
+      group to be valid under a Developer ID / notarized build. For an
+      ad-hoc signed build the prefix is empty and the access group is
+      effectively inert, which matches the current build_app.sh workflow.
+
+      Until you have a real signing identity, the keychain store will
+      resolve to the default access group for the binary (i.e. the
+      credential service name still works, just without a shared group).
+    -->
     <key>keychain-access-groups</key>
     <array>
-        <string>com.remmina-mac.credentials</string>
+        <string>$(AppIdentifierPrefix)com.stormbringer-v1.remminamac.credentials</string>
     </array>
 </dict>
 </plist>

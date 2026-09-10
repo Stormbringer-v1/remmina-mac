@@ -5,83 +5,74 @@ import Foundation
 @Suite("Stress & Robustness Tests")
 struct StressTests {
     
-    // MARK: - Output Buffer Tests
-    
-    @Test("Output buffer truncation at 1MB")
-    func testOutputBufferTruncation() {
-        let manager = ConnectionManager()
-        let sessionId = UUID()
-        
-        // Simulate a buffer that exists
-        // We can't create a real session, but we can test the buffer logic directly
-        var buffer = Data()
-        let chunk = Data(repeating: 0x41, count: 8192) // 8KB chunks
-        
-        // Fill buffer to > 1MB
-        for _ in 0..<130 { // 130 * 8KB = ~1.04MB
-            buffer.append(chunk)
-        }
-        
-        #expect(buffer.count > 1_048_576, "Buffer should exceed 1MB")
-        
-        // Apply same truncation logic as ConnectionManager.sessionDidReceiveOutput
-        if buffer.count > 1_048_576 {
-            buffer = buffer.suffix(524_288)
-        }
-        
-        #expect(buffer.count == 524_288, "Buffer should be truncated to 512KB")
-    }
-    
-    @Test("Output buffer handles empty data")
-    func testOutputBufferEmptyData() {
-        var buffer = Data()
-        let emptyChunk = Data()
-        buffer.append(emptyChunk)
-        #expect(buffer.count == 0)
-    }
-    
-    @Test("Output buffer handles rapid appends")
-    func testOutputBufferRapidAppends() {
-        var buffer = Data()
-        
-        // Simulate 10,000 small appends (realistic for SSH terminal output)
-        for i in 0..<10_000 {
-            let byte = UInt8(i % 256)
-            buffer.append(byte)
-        }
-        
-        #expect(buffer.count == 10_000)
-    }
-    
     // MARK: - AppLogger Tests
     
     @Test("Logger ring buffer caps at 1000 entries")
-    func testLoggerRingBuffer() {
+    func testLoggerRingBuffer() async throws {
         let logger = AppLogger.shared
-        let initialCount = logger.entries.count
-        
-        // Add many entries to trigger ring buffer pruning
-        for i in 0..<1050 {
+        let initialCount = await MainActor.run { logger.entries.count }
+
+        // Add many entries to trigger ring buffer pruning.
+        for i in 0..<1500 {
             logger.log("Stress test entry \(i)")
         }
-        
-        // Ring buffer should cap at 1000
-        // Note: entries are added on main queue, so we need to wait
-        // In unit tests with Swift Testing, main queue may be available
-        #expect(logger.entries.count <= 1000 + initialCount || logger.entries.count <= 1050,
-                "Logger should not grow unbounded")
+
+        // Poll for the dispatch-source flush to settle, then assert that the
+        // ring buffer is bounded. We added 1500 entries, so the count must
+        // be strictly less than `initialCount + 1500` (the ring buffer caps
+        // at 1000) and the new entries are present in the buffer.
+        var finalCount = 0
+        var containsRecent = false
+        for _ in 0..<40 {
+            finalCount = await MainActor.run { logger.entries.count }
+            containsRecent = await MainActor.run {
+                logger.entries.contains { $0.message == "Stress test entry 1499" }
+            }
+            if containsRecent { break }
+            try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+        }
+
+        // The buffer should not have grown by the full 1500 we just added;
+        // the ring buffer is bounded.
+        let growth = finalCount - initialCount
+        #expect(growth < 1500,
+                "Logger ring buffer should cap growth below 1500 entries (was \(growth))")
+        #expect(containsRecent,
+                "Logger should contain the most recent entry after ring-buffer pruning")
     }
-    
+
     @Test("Logger handles all log levels")
-    func testLoggerAllLevels() {
+    func testLoggerAllLevels() async throws {
         let logger = AppLogger.shared
-        
-        logger.log("Info test", level: .info)
-        logger.log("Warning test", level: .warning)
-        logger.log("Error test", level: .error)
-        logger.log("Debug test", level: .debug)
-        
-        // Should not crash — all levels are valid
+
+        let token1 = "audit-info-\(UUID().uuidString)"
+        let token2 = "audit-warning-\(UUID().uuidString)"
+        let token3 = "audit-error-\(UUID().uuidString)"
+        let token4 = "audit-debug-\(UUID().uuidString)"
+
+        logger.log(token1, level: .info)
+        logger.log(token2, level: .warning)
+        logger.log(token3, level: .error)
+        logger.log(token4, level: .debug)
+
+        // Each level should be accepted and stored in the ring buffer.
+        var found: [String: Bool] = [:]
+        for _ in 0..<40 {
+            found = await MainActor.run {
+                var result: [String: Bool] = [:]
+                result[token1] = logger.entries.contains { $0.message == token1 }
+                result[token2] = logger.entries.contains { $0.message == token2 }
+                result[token3] = logger.entries.contains { $0.message == token3 }
+                result[token4] = logger.entries.contains { $0.message == token4 }
+                return result
+            }
+            if found.values.allSatisfy({ $0 }) { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        for (token, present) in found {
+            #expect(present, "Logger should have stored entry for \(token)")
+        }
     }
     
     @Test("Logger handles correlation IDs")
@@ -367,7 +358,7 @@ struct StressTests {
     // MARK: - Validator Fuzzing
     
     @Test("Validator fuzzing - random character strings")
-    func testValidatorFuzzing() {
+    func testValidatorFuzzing() throws {
         // Generate a variety of nasty strings
         let nastyCharacters: [Character] = [
             "\0", "\n", "\r", "\t", " ", ";", "|", "&", "`", "$", "(", ")", "{", "}", "!", "<", ">", "\\", "'", "\"",
@@ -413,12 +404,22 @@ struct StressTests {
             _ = try? SSHKeyValidator.validate(str, isUserSelected: false)
         }
         
-        // If we reach here without crashing, the fuzzing passed
-        #expect(true, "Fuzzing completed without crashing")
+        // Assert specific outcomes for known valid and invalid inputs
+        #expect(throws: ProfileValidator.ValidationError.self) {
+            try ProfileValidator.validateName("")
+        }
+        #expect(throws: ProfileValidator.ValidationError.self) {
+            try ProfileValidator.validateHost("bad;host")
+        }
+        let validName = try ProfileValidator.validateName("Production Server")
+        #expect(!validName.isEmpty)
+        let validHost = try ProfileValidator.validateHost("192.168.1.1")
+        #expect(!validHost.isEmpty)
+        #expect(nastyStrings.count >= 50)
     }
     
     @Test("HostnameValidator fuzzing - IP address edge cases")
-    func testHostnameValidatorFuzzing() {
+    func testHostnameValidatorFuzzing() throws {
         let edgeCases = [
             "0.0.0.0", "255.255.255.255", "127.0.0.1", "169.254.169.254", "10.0.0.1", "172.16.0.1", "192.168.0.1",
             "::1", "fe80::1", "::ffff:127.0.0.1",
@@ -437,7 +438,18 @@ struct StressTests {
             _ = try? ProfileValidator.validateHost(host)
         }
         
-        // Should not crash
-        #expect(true, "Hostname fuzzing completed without crashing")
+        // Assert specific outcomes for known valid and invalid edge cases
+        #expect(throws: HostnameValidator.ValidationError.self) {
+            try HostnameValidator.validate("file:///etc/passwd")
+        }
+        #expect(throws: HostnameValidator.ValidationError.self) {
+            try HostnameValidator.validate("0.0.0.0")
+        }
+        #expect(throws: HostnameValidator.ValidationError.self) {
+            try HostnameValidator.validate("..")
+        }
+        let validIP = try HostnameValidator.validate("192.168.0.1")
+        #expect(!validIP.isEmpty)
+        #expect(edgeCases.count > 10)
     }
 }

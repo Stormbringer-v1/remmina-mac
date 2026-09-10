@@ -12,9 +12,9 @@ final class ProfileStore {
 
     // MARK: - CRUD
 
-    func add(_ profile: ConnectionProfile) throws {
+    func add(_ profile: ConnectionProfile, allowMissingSSHKey: Bool = false) throws {
         // Validate profile before adding
-        try ProfileValidator.validate(profile, blockPrivateRanges: false)
+        try ProfileValidator.validate(profile, blockPrivateRanges: false, sshKeyAllowMissing: allowMissingSSHKey)
 
         modelContext.insert(profile)
         save()
@@ -31,7 +31,18 @@ final class ProfileStore {
         do {
             try modelContext.save()
         } catch {
+            modelContext.rollback()
             AppLogger.shared.log("Failed to save profiles: \(error.localizedDescription)", level: .error)
+        }
+    }
+
+    func saveOrRollback() throws {
+        do {
+            try modelContext.save()
+        } catch {
+            modelContext.rollback()
+            AppLogger.shared.log("Failed to save profiles, rolled back: \(error.localizedDescription)", level: .error)
+            throw error
         }
     }
 

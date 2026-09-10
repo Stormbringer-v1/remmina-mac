@@ -18,10 +18,7 @@ let package = Package(
             dependencies: [
                 .product(name: "SwiftTerm", package: "SwiftTerm")
             ],
-            path: "Sources/RemminaMac",
-            swiftSettings: [
-                .unsafeFlags(["-parse-as-library"])
-            ]
+            path: "Sources/RemminaMac"
         ),
         .testTarget(
             name: "RemminaMacTests",

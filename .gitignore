@@ -62,3 +62,6 @@ dist/
 .agents/
 docs/private/
 
+
+# Review findings — local working doc, keep out of the public repo
+PROBLEMS.md

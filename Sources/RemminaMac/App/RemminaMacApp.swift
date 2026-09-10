@@ -4,46 +4,162 @@ import SwiftData
 @main
 struct RemminaMacApp: App {
     let modelContainer: ModelContainer
+    let appState: AppState
 
     @State private var connectionManager = ConnectionManager()
+    @State private var showingRecoveryAlert = false
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     init() {
-        // Graceful DB recovery instead of fatalError
-        // If the store is corrupted, we attempt recovery; never crash on launch.
+        self.init(appState: nil)
+    }
+
+    init(appState: AppState?) {
+        let state = appState ?? AppState()
+        var container: ModelContainer?
+
+        let schema = Schema([ConnectionProfile.self])
+        let modelConfiguration = ModelConfiguration(
+            "RemminaMac",
+            schema: schema,
+            isStoredInMemoryOnly: false
+        )
+
         do {
-            let schema = Schema([ConnectionProfile.self])
-            let modelConfiguration = ModelConfiguration(
-                "RemminaMac",
-                schema: schema,
-                isStoredInMemoryOnly: false
-            )
-            modelContainer = try ModelContainer(for: schema, configurations: [modelConfiguration])
+            container = try ModelContainer(for: schema, configurations: [modelConfiguration])
         } catch {
-            // Attempt recovery: try in-memory store so the app launches
-            AppLogger.shared.log("Database corrupted: \(error). Using temporary in-memory store.", level: .error)
+            AppLogger.shared.log("Database corrupted: \(error). Backing up and attempting recovery.", level: .error)
+
+            let backupPath = Self.backupCorruptedStore(storeURL: modelConfiguration.url)
+            state.recoveryMode = true
+            state.recoveryBackupPath = backupPath
+
+            let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? URL.applicationSupportDirectory
+            let recoveryURL = appSupport.appendingPathComponent("RemminaMac").appendingPathComponent("RemminaMac-Recovery-\(timestamp).store")
+
             do {
-                let schema = Schema([ConnectionProfile.self])
-                let fallbackConfig = ModelConfiguration(
+                try? FileManager.default.createDirectory(at: recoveryURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let onDiskRecoveryConfig = ModelConfiguration(
                     "RemminaMac-Recovery",
                     schema: schema,
-                    isStoredInMemoryOnly: true
+                    url: recoveryURL
                 )
-                modelContainer = try ModelContainer(for: schema, configurations: [fallbackConfig])
+                container = try ModelContainer(for: schema, configurations: [onDiskRecoveryConfig])
             } catch {
-                // Absolute last resort — this should never happen
-                fatalError("Cannot create even in-memory store: \(error)")
+                do {
+                    let fallbackConfig = ModelConfiguration(
+                        "RemminaMac-Recovery",
+                        schema: schema,
+                        isStoredInMemoryOnly: true
+                    )
+                    container = try ModelContainer(for: schema, configurations: [fallbackConfig])
+                } catch {
+                    fatalError("Cannot create even in-memory store: \(error)")
+                }
             }
         }
+
+        self.modelContainer = container!
+        self.appState = state
+    }
+
+    /// Backs up corrupted store files to ~/Library/Application Support/RemminaMac/Backups/<ISO8601 timestamp>/
+    @discardableResult
+    static func backupCorruptedStore(
+        storeURL: URL? = nil,
+        fileManager: FileManager = .default,
+        timestamp: String = ISO8601DateFormatter().string(from: Date())
+    ) -> String? {
+        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL.applicationSupportDirectory
+        let baseStoreURL = storeURL ?? appSupport.appendingPathComponent("RemminaMac.store")
+        
+        let backupDir = appSupport.appendingPathComponent("RemminaMac/Backups/\(timestamp)")
+        
+        let candidateURLs: [URL] = [
+            baseStoreURL,
+            appSupport.appendingPathComponent("RemminaMac/RemminaMac.store"),
+            appSupport.appendingPathComponent("default.store")
+        ]
+        
+        var filesFound = 0
+        
+        for candidate in candidateURLs {
+            let candidateBase = candidate.path
+            let suffixes = ["", "-wal", "-shm"]
+            for suffix in suffixes {
+                let filePath = candidateBase + suffix
+                if fileManager.fileExists(atPath: filePath) {
+                    do {
+                        try fileManager.createDirectory(at: backupDir, withIntermediateDirectories: true)
+                        let fileName = URL(fileURLWithPath: filePath).lastPathComponent
+                        let destURL = backupDir.appendingPathComponent(fileName)
+                        try fileManager.copyItem(at: URL(fileURLWithPath: filePath), to: destURL)
+                        filesFound += 1
+                    } catch {
+                        AppLogger.shared.log("Failed to copy \(filePath) to backup: \(error)", level: .error)
+                    }
+                }
+            }
+            if filesFound > 0 { break }
+        }
+        
+        if filesFound > 0 {
+            AppLogger.shared.log("Corrupted store backed up to: \(backupDir.path)", level: .error)
+            return backupDir.path
+        }
+        
+        return nil
     }
 
     var body: some Scene {
         WindowGroup {
             MainView()
                 .environment(connectionManager)
+                .environment(appState)
+                .safeAreaInset(edge: .top) {
+                    if appState.recoveryMode {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.yellow)
+                            Text("Recovery mode: changes are not saved")
+                                .font(.callout)
+                                .fontWeight(.medium)
+                            if let backupPath = appState.recoveryBackupPath {
+                                Text("(Backup: \(backupPath))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.orange.opacity(0.15))
+                        .overlay(
+                            Rectangle()
+                                .frame(height: 1)
+                                .foregroundColor(.orange.opacity(0.3)),
+                            alignment: .bottom
+                        )
+                    }
+                }
                 .frame(minWidth: 900, minHeight: 600)
+                .alert("Recovery Mode", isPresented: $showingRecoveryAlert) {
+                    Button("OK", role: .cancel) {}
+                } message: {
+                    if let backup = appState.recoveryBackupPath {
+                        Text("The database failed to load and was backed up to:\n\(backup)\n\nThe app is running in recovery mode.")
+                    } else {
+                        Text("The database failed to load. The app is running in recovery mode.")
+                    }
+                }
                 .onAppear {
                     appDelegate.connectionManager = connectionManager
+                    if appState.recoveryMode {
+                        showingRecoveryAlert = true
+                    }
                 }
         }
         .modelContainer(modelContainer)
@@ -65,6 +181,10 @@ struct RemminaMacApp: App {
                 }
                 .keyboardShortcut("w", modifiers: [.command, .shift])
             }
+        }
+
+        Settings {
+            SecuritySettingsView()
         }
     }
 }

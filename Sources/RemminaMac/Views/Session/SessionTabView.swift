@@ -16,8 +16,23 @@ struct SessionTabView: View {
 
             // Active session content
             if let activeSession = connectionManager.activeSession {
-                sessionContent(for: activeSession)
-                    .id(activeSession.id)
+                // ZStack of all sessions, only the active one is visible. This
+                // keeps every session's view alive across tab switches so the
+                // SwiftTerm scrollback (and VNC framebuffer, RDP state) is
+                // preserved. The previous `.id(activeSession.id)` destroyed
+                // and rebuilt the view on every tab switch, which is why
+                // switching tabs lost scrollback.
+                ZStack {
+                    ForEach(connectionManager.sessions, id: \.id) { session in
+                        let isActive = session.id == connectionManager.activeSessionId
+                        SessionContainerView(isActive: isActive) {
+                            sessionContent(for: session)
+                        }
+                        .opacity(isActive ? 1 : 0)
+                        .allowsHitTesting(isActive)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 // Session toolbar
                 sessionToolbar(for: activeSession)
@@ -44,11 +59,12 @@ struct SessionTabView: View {
 
     private func tabItem(for session: any SessionProtocol) -> some View {
         let isActive = session.id == connectionManager.activeSessionId
+        let status = connectionManager.status(for: session.id)
 
         return HStack(spacing: 6) {
-            // Status indicator
+            // Status indicator — observes the connectionManager's status mirror
             Circle()
-                .fill(statusColor(for: session.status))
+                .fill(statusColor(for: status))
                 .frame(width: 8, height: 8)
 
             Image(systemName: session.protocolType.iconName)
@@ -105,13 +121,15 @@ struct SessionTabView: View {
     // MARK: - Session Toolbar
 
     private func sessionToolbar(for session: any SessionProtocol) -> some View {
-        HStack(spacing: 12) {
-            // Status
+        let status = connectionManager.status(for: session.id)
+
+        return HStack(spacing: 12) {
+            // Status — observes the connectionManager's status mirror
             HStack(spacing: 4) {
                 Circle()
-                    .fill(statusColor(for: session.status))
+                    .fill(statusColor(for: status))
                     .frame(width: 8, height: 8)
-                Text(session.status.displayName)
+                Text(status.displayName)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -125,7 +143,7 @@ struct SessionTabView: View {
                 Label("Reconnect", systemImage: "arrow.clockwise")
             }
             .buttonStyle(.borderless)
-            .disabled(!session.status.isActive && session.status != .disconnected)
+            .disabled(!status.isActive && status != .disconnected)
 
             Button(action: {
                 connectionManager.closeSession(session)
@@ -165,5 +183,75 @@ struct SessionTabView: View {
         case .disconnected: return .gray
         case .error: return .red
         }
+    }
+}
+
+// MARK: - AppKit Focus & Visibility Management
+
+/// Manages AppKit focus and isHidden state for session views across tab switches (PROBLEMS.md ISSUE-003).
+private struct SessionContainerView<Content: View>: NSViewRepresentable {
+    let isActive: Bool
+    let content: Content
+
+    init(isActive: Bool, @ViewBuilder content: () -> Content) {
+        self.isActive = isActive
+        self.content = content()
+    }
+
+    func makeNSView(context: Context) -> SessionHostingContainerView {
+        let container = SessionHostingContainerView()
+        let hostingView = NSHostingView(rootView: AnyView(content))
+        container.hostingView = hostingView
+        container.addSubview(hostingView)
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            hostingView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: container.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+        container.updateActive(isActive)
+        return container
+    }
+
+    func updateNSView(_ container: SessionHostingContainerView, context: Context) {
+        container.hostingView?.rootView = AnyView(content)
+        container.updateActive(isActive)
+    }
+}
+
+private final class SessionHostingContainerView: NSView {
+    var hostingView: NSHostingView<AnyView>?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
+    func updateActive(_ isActive: Bool) {
+        self.isHidden = !isActive
+        if isActive {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, !self.isHidden, let window = self.window else { return }
+                if let responder = self.findFirstResponder(in: self), window.firstResponder !== responder {
+                    window.makeFirstResponder(responder)
+                }
+            }
+        }
+    }
+
+    private func findFirstResponder(in view: NSView) -> NSView? {
+        for subview in view.subviews {
+            if let found = findFirstResponder(in: subview) {
+                return found
+            }
+        }
+        if view.acceptsFirstResponder && !String(describing: type(of: view)).contains("Hosting") {
+            return view
+        }
+        return nil
     }
 }

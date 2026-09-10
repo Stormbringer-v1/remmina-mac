@@ -16,6 +16,12 @@ final class ConnectionManager: SessionDelegate {
     /// Output buffers per session for terminal rendering.
     private(set) var outputBuffers: [UUID: Data] = [:]
 
+    /// Observable mirror of each session's status. The session classes are
+    /// reference types but not @Observable, so views that want to redraw
+    /// on status changes must observe this dictionary instead of reading
+    /// `session.status` directly.
+    private(set) var sessionStatuses: [UUID: SessionStatus] = [:]
+
     /// Tracks which sessions need health checks after system wake
     private var needsHealthCheck = false
 
@@ -25,13 +31,48 @@ final class ConnectionManager: SessionDelegate {
 
     /// Number of active (connected/connecting) sessions
     var activeCount: Int {
-        sessions.filter { $0.status.isActive }.count
+        sessions.filter { (sessionStatuses[$0.id] ?? $0.status).isActive }.count
+    }
+
+    /// Observable accessor for a session's status. Falls back to the session's
+    /// own status if the mirror hasn't been populated yet (which happens on
+    /// the synchronous path before the delegate callback fires).
+    func status(for sessionId: UUID) -> SessionStatus {
+        sessionStatuses[sessionId] ?? sessions.first(where: { $0.id == sessionId })?.status ?? .disconnected
+    }
+
+    // MARK: - Factory & Lifecycle
+
+    typealias SessionFactory = (ConnectionProfile, String?) -> any SessionProtocol
+
+    static let defaultFactory: SessionFactory = { profile, password in
+        switch profile.protocolType {
+        case .ssh:
+            return SSHSession(profile: profile, password: password)
+        case .vnc:
+            return VNCSession(profile: profile, password: password)
+        case .rdp:
+            return RDPSession(profile: profile, password: password)
+        }
+    }
+
+    private let sessionFactory: SessionFactory
+
+    init(sessionFactory: @escaping SessionFactory = ConnectionManager.defaultFactory) {
+        self.sessionFactory = sessionFactory
     }
 
     // MARK: - Session Management
 
     /// Maximum concurrent sessions to prevent resource exhaustion
     static let maxSessions = 20
+
+    /// Per-session output buffer ceiling (1 MiB). Once a session's scrollback
+    /// exceeds this, we trim the oldest bytes.
+    static let outputBufferMaxBytes = 1 << 20
+    /// When the buffer is trimmed, retain this many of the most-recent bytes
+    /// (512 KiB).
+    static let outputBufferTrimBytes = 1 << 19
 
     /// Opens a new session for the given profile.
     /// Returns false if a session to this profile already exists (prevents duplicates)
@@ -60,20 +101,14 @@ final class ConnectionManager: SessionDelegate {
         }
 
         let password = KeychainStore.shared.getPassword(for: profile.id)
-        let session: any SessionProtocol
-
-        switch profile.protocolType {
-        case .ssh:
-            session = SSHSession(profile: profile, password: password)
-        case .vnc:
-            session = VNCSession(profile: profile, password: password)
-        case .rdp:
-            session = RDPSession(profile: profile, password: password)
-        }
+        let session = sessionFactory(profile, password)
 
         session.delegate = self
         sessions.append(session)
         outputBuffers[session.id] = Data()
+        // Seed the observable status mirror with the initial status so views
+        // don't briefly show "Disconnected" before the delegate fires.
+        sessionStatuses[session.id] = session.status
         activeSessionId = session.id
         session.connect()
 
@@ -83,9 +118,11 @@ final class ConnectionManager: SessionDelegate {
     }
 
     func closeSession(_ session: any SessionProtocol) {
+        session.delegate = nil
         session.disconnect()
         sessions.removeAll { $0.id == session.id }
         outputBuffers.removeValue(forKey: session.id)
+        sessionStatuses.removeValue(forKey: session.id)
 
         if activeSessionId == session.id {
             activeSessionId = sessions.last?.id
@@ -102,10 +139,12 @@ final class ConnectionManager: SessionDelegate {
 
     func closeAll() {
         for session in sessions {
+            session.delegate = nil
             session.disconnect()
         }
         sessions.removeAll()
         outputBuffers.removeAll()
+        sessionStatuses.removeAll()
         activeSessionId = nil
         updateDockBadge()
     }
@@ -153,16 +192,26 @@ final class ConnectionManager: SessionDelegate {
     // MARK: - SessionDelegate
 
     func sessionDidChangeStatus(_ session: any SessionProtocol, status: SessionStatus) {
+        // Late status callbacks must not re-insert closed sessions (PROBLEMS.md ISSUE-015)
+        guard sessions.contains(where: { $0.id == session.id }) else { return }
+
+        // Mirror the status into the observable dictionary so views that
+        // observe `connectionManager.sessionStatuses[id]` will redraw when
+        // the underlying session changes state.
+        sessionStatuses[session.id] = status
         AppLogger.shared.log("Session \(session.profileName) status: \(status.displayName)")
         updateDockBadge()
     }
 
     func sessionDidReceiveOutput(_ session: any SessionProtocol, data: Data) {
+        guard sessions.contains(where: { $0.id == session.id }) else { return }
         if var buffer = outputBuffers[session.id] {
             buffer.append(data)
-            // Keep max 1MB of scrollback
-            if buffer.count > 1_048_576 {
-                buffer = buffer.suffix(524_288)
+            // Keep at most 1 MB of scrollback per session; when the buffer
+            // overflows, trim to the most recent 512 KB so the user keeps
+            // the most recent context.
+            if buffer.count > ConnectionManager.outputBufferMaxBytes {
+                buffer = buffer.suffix(ConnectionManager.outputBufferTrimBytes)
             }
             outputBuffers[session.id] = buffer
         }

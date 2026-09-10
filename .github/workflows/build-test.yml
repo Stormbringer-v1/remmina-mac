@@ -15,10 +15,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Swift toolchain
-        uses: swift-actions/setup-swift@v1
-        with:
-          swift-version: "5.9"
+      # The test target uses Swift Testing (Swift 6.0+ / Xcode 16+) and
+      # SwiftTerm's manifest also needs a recent toolchain. Select the newest
+      # installed Xcode 16 explicitly rather than relying on the runner default,
+      # which has historically been an older Xcode on the macos-14 image.
+      - name: Select Xcode 16
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XCODE" ]; then sudo xcode-select -s "$XCODE"; fi
+          xcodebuild -version
+          swift --version
 
       - name: Build
         run: swift build
