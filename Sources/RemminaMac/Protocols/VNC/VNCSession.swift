@@ -23,20 +23,31 @@ final class VNCSession: SessionProtocol {
     let protocolType: ProtocolType = .vnc
     weak var delegate: SessionDelegate?
 
-    private(set) var status: SessionStatus = .disconnected {
-        didSet {
-            // Bounce to the main thread for the delegate so the view layer
-            // and dock badge updates stay on a single thread. `fail(_:)`
-            // uses a `DispatchQueue.main.async` block too, so this branch
-            // never races with the explicit main-thread status assignment.
-            if Thread.isMainThread {
-                delegate?.sessionDidChangeStatus(self, status: status)
-            } else {
-                let s = status
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self else { return }
-                    self.delegate?.sessionDidChangeStatus(self, status: s)
-                }
+    /// Lock-protected `status` (PROBLEMS.md ISSUE-012, thread sanitizer).
+    /// All state transitions are bounced to the main thread, but reads
+    /// happen from any thread: `VNCSessionView`'s clipboard poller reads
+    /// from the main actor while tests poll from a background executor
+    /// thread, which TSan flags against the main-thread write. The lock
+    /// makes every access atomic; the delegate notification still runs on
+    /// main exactly as before (never holding the lock while calling out).
+    private let statusLock = OSAllocatedUnfairLock<SessionStatus>(initialState: .disconnected)
+    private(set) var status: SessionStatus {
+        get { statusLock.withLock { $0 } }
+        set {
+            statusLock.withLock { $0 = newValue }
+            notifyStatusChange(newValue)
+        }
+    }
+
+    /// Bounce the delegate callback to the main thread so the view layer
+    /// and dock badge updates stay on a single thread.
+    private func notifyStatusChange(_ s: SessionStatus) {
+        if Thread.isMainThread {
+            delegate?.sessionDidChangeStatus(self, status: s)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.delegate?.sessionDidChangeStatus(self, status: s)
             }
         }
     }
@@ -55,7 +66,18 @@ final class VNCSession: SessionProtocol {
     /// dispatch its read/write events, and driving that from a
     /// background thread is fragile. POSIX sockets + Darwin.read/write
     /// are synchronous and don't have that problem.
-    private var socketFD: Int32 = -1
+    ///
+    /// Lock-protected (PROBLEMS.md ISSUE-012, thread sanitizer): the read
+    /// thread assigns it in `attemptConnect`/`performConnection` while
+    /// `tearDownStreams`/`deinit` (any thread) and `readExact`/`writeData`
+    /// (read thread / write queue) read it. Callers snapshot the fd under
+    /// the lock and use the snapshot for blocking syscalls — the lock is
+    /// never held across a syscall.
+    private let socketLock = OSAllocatedUnfairLock<Int32>(initialState: -1)
+    private var socketFD: Int32 {
+        get { socketLock.withLock { $0 } }
+        set { socketLock.withLock { $0 = newValue } }
+    }
 
     /// Serial queue for post-handshake client-to-server writes. Pre-handshake
     /// writes (version banner, security type choice, pixel format, encodings)
@@ -67,7 +89,17 @@ final class VNCSession: SessionProtocol {
     /// previous unsynchronized `var isRunning = false`.
     private let runningLock = OSAllocatedUnfairLock<Bool>(initialState: false)
     private let cancelledLock = OSAllocatedUnfairLock<Bool>(initialState: false)
-    private var timeoutWorkItem: DispatchWorkItem?
+    /// Lock-protected (PROBLEMS.md ISSUE-012, thread sanitizer): cancelled
+    /// from `tearDownStreams` (any thread: read thread via `fail(_:)`,
+    /// test/main thread via `disconnect()`), replaced in
+    /// `startConnectionTimeout` (caller thread), and cancelled again in
+    /// the main-thread `setConnected` closure. The cancel-then-nil pair is
+    /// idempotent, so per-access atomicity is sufficient.
+    private let timeoutLock = OSAllocatedUnfairLock<DispatchWorkItem?>(initialState: nil)
+    private var timeoutWorkItem: DispatchWorkItem? {
+        get { timeoutLock.withLock { $0 } }
+        set { timeoutLock.withLock { $0 = newValue } }
+    }
 
     /// Connection timeout in seconds (covers DNS resolution + connect()
     /// across all candidates). An instance property, like
@@ -417,8 +449,9 @@ final class VNCSession: SessionProtocol {
         // tearDownStreams to unblock any pending read; close() releases
         // the file descriptor.
         runningLock.withLock { $0 = false }
-        if socketFD >= 0 {
-            close(socketFD)
+        let closingFD = socketFD
+        if closingFD >= 0 {
+            close(closingFD)
             socketFD = -1
         }
     }
