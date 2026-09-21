@@ -174,9 +174,15 @@ struct RDPArgumentsTests {
         let counter = InvocationCounter()
 
         // Emits actual output so a passing "<5 invocations" isn't satisfied
-        // vacuously by zero invocations.
+        // vacuously by zero invocations. The `sleep 1` is load-bearing: this
+        // test arms the reader with the standalone startReading() *after*
+        // launch (production arms it inside launch), and on macOS output
+        // written before the slave closes is unreadable once it has closed.
+        // A child that exits instantly can therefore beat the reader on a
+        // loaded CI runner and deliver nothing; keeping it alive for a second
+        // removes that race without changing what the test proves.
         try session.pty.launch(path: "/bin/sh",
-                                args: ["-c", "echo hi; exit 0"],
+                                args: ["-c", "echo hi; sleep 1; exit 0"],
                                 env: [:],
                                 onExit: { _ in exited.increment() },
                                 onExitQueue: .global())
@@ -193,8 +199,12 @@ struct RDPArgumentsTests {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
 
-        // Give the main queue time to drain the queued onOutputReceived call.
-        try await Task.sleep(nanoseconds: 300_000_000)
+        // Wait (scaled for CI) for the queued onOutputReceived call to land on
+        // the main queue rather than assuming a fixed 300 ms is enough.
+        let outputDeadline = Date().addingTimeInterval(3.0 * ciDeadlineScale)
+        while counter.value == 0 && Date() < outputDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
         #expect(counter.value >= 1, "expected at least one onData invocation carrying the child's output")
 
         // Give the read source more time to observe EOF and cancel; invocations

@@ -14,7 +14,11 @@ import AppKit
 ///   - ISSUE-013: unknown message type / unsupported encoding → .error
 ///   - ISSUE-014: writeData precondition is onQueue(writeQueue)
 ///   - ISSUE-020: VNC parser bounds, no-op-only behavior
-@Suite("VNC Wire Protocol — FakeVNCServer")
+// Serialized: every test here spins up a real socket server plus the
+// session's read thread, and the liveness-probe tests hold their threads for
+// tens of seconds under CI scaling. Running them concurrently on a
+// three-core CI runner starved the shorter tests past their connect waits.
+@Suite("VNC Wire Protocol — FakeVNCServer", .serialized)
 struct VNCWireTests {
 
     /// Helper: build a VNCSession whose profile points at a 127.0.0.1
@@ -40,7 +44,7 @@ struct VNCWireTests {
     /// test that connects and immediately reads `status` will see the
     /// pre-connection value. This helper lets us wait for them.
     private func waitFor(_ predicate: () -> Bool,
-                         timeout: TimeInterval = 3.0) -> Bool {
+                         timeout: TimeInterval = 3.0 * ciDeadlineScale) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if predicate() { return true }
@@ -233,17 +237,17 @@ struct VNCWireTests {
             if case .disconnected = session?.status { return true }
             if case .error = session?.status { return true }
             return false
-        }, timeout: 2.0)
+        }, timeout: 2.0 * ciDeadlineScale)
         let elapsed = Date().timeIntervalSince(t0)
         #expect(disconnected, "session did not reach .disconnected within 2s")
-        #expect(elapsed < 2.0, "disconnect took \(elapsed)s, expected < 2s")
+        #expect(elapsed < 2.0 * ciDeadlineScale, "disconnect took \(elapsed)s, expected < 2s")
 
         // Drop the local strong reference so only the read thread's reference (if any) remains.
         session = nil
 
         // Poll for deallocation
         let start = CFAbsoluteTimeGetCurrent()
-        while weakSession != nil && (CFAbsoluteTimeGetCurrent() - start) < 2.0 {
+        while weakSession != nil && (CFAbsoluteTimeGetCurrent() - start) < 2.0 * ciDeadlineScale {
             RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
             usleep(20_000)
         }
@@ -258,7 +262,7 @@ struct VNCWireTests {
         let server = try FakeVNCServer.start(); defer { server.stop() }
         let p = ConnectionProfile(name: "ip", protocolType: .vnc, host: "127.0.0.1", port: Int(server.port))
         let s = VNCSession(profile: p, password: nil); s.connect()
-        #expect(server.waitForClient(timeout: 3.0) == true)
+        #expect(server.waitForClient(timeout: 3.0 * ciDeadlineScale) == true)
     }
 
     @Test("VNCSession reaches the same server by hostname 'localhost'")
@@ -266,7 +270,7 @@ struct VNCWireTests {
         let server = try FakeVNCServer.start(); defer { server.stop() }
         let p = ConnectionProfile(name: "name", protocolType: .vnc, host: "localhost", port: Int(server.port))
         let s = VNCSession(profile: p, password: nil); s.connect()
-        #expect(server.waitForClient(timeout: 3.0) == true)
+        #expect(server.waitForClient(timeout: 3.0 * ciDeadlineScale) == true)
     }
 
     @Test("VNC: a non-resolving hostname reaches .error within 5s, not a 75s hang")
@@ -277,10 +281,10 @@ struct VNCWireTests {
         let sawError = waitFor({
             if case .error = session.status { return true }
             return false
-        }, timeout: 5.0)
+        }, timeout: 5.0 * ciDeadlineScale)
         let elapsed = Date().timeIntervalSince(t0)
         #expect(sawError, "Expected .error for a non-resolving host, got \(session.status)")
-        #expect(elapsed < 5.0, "Resolution failure took \(elapsed)s, expected < 5s")
+        #expect(elapsed < 5.0 * ciDeadlineScale, "Resolution failure took \(elapsed)s, expected < 5s")
         session.disconnect()
     }
 
@@ -307,10 +311,10 @@ struct VNCWireTests {
         let sawError = waitFor({
             if case .error = session?.status { return true }
             return false
-        }, timeout: 5.0)
+        }, timeout: 5.0 * ciDeadlineScale)
         let elapsed = Date().timeIntervalSince(t0)
         #expect(sawError, "Expected .error for a blackholed SYN, got \(String(describing: session?.status))")
-        #expect(elapsed < 4.0, "Blackholed connect took \(elapsed)s to fail, expected just over the 2s deadline")
+        #expect(elapsed < 4.0 * ciDeadlineScale, "Blackholed connect took \(elapsed)s to fail, expected just over the 2s deadline")
 
         // Drop the local strong reference; the read thread must have
         // already exited (and released its own `self` capture) by the
@@ -319,7 +323,7 @@ struct VNCWireTests {
         // the ISSUE-028 defect this test guards against.
         session = nil
         let start = CFAbsoluteTimeGetCurrent()
-        while weakSession != nil && (CFAbsoluteTimeGetCurrent() - start) < 2.0 {
+        while weakSession != nil && (CFAbsoluteTimeGetCurrent() - start) < 2.0 * ciDeadlineScale {
             RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
             usleep(20_000)
         }
@@ -478,7 +482,7 @@ struct VNCWireTests {
         #expect(waitFor({ session.status == .connected }))
         // Server hangs up.
         server.stop()
-        let sawDisconnected = waitFor({ session.status == .disconnected }, timeout: 3.0)
+        let sawDisconnected = waitFor({ session.status == .disconnected }, timeout: 3.0 * ciDeadlineScale)
         #expect(sawDisconnected, "Expected .disconnected after server close, got \(session.status)")
     }
 
