@@ -53,4 +53,44 @@ struct PasswordPromptDetectorTests {
         detector.reset()
         #expect(detector.matches() == false)
     }
+
+    @Test("classify() distinguishes password prompts from passphrase prompts")
+    func testClassifyDistinguishesPasswordFromPassphrase() {
+        // A plain password prompt classifies as .password.
+        let plainPassword = Data("Password:".utf8)
+        #expect(PasswordPromptDetector.classify(window: plainPassword) == .password)
+        #expect(PasswordPromptDetector.matches(window: plainPassword) == true)
+
+        // user@host's password:
+        let userPassword = Data("user@host's password: ".utf8)
+        #expect(PasswordPromptDetector.classify(window: userPassword) == .password)
+
+        // A passphrase prompt classifies as .passphrase, and must never be
+        // mistaken for .password (so matches() stays false for it).
+        let passphrase = Data("Enter passphrase for key '/Users/x/.ssh/id_ed25519':".utf8)
+        #expect(PasswordPromptDetector.classify(window: passphrase) == .passphrase)
+        #expect(PasswordPromptDetector.classify(window: passphrase) != .password)
+        #expect(PasswordPromptDetector.matches(window: passphrase) == false)
+
+        // A banner line containing "password:" followed by a newline is not
+        // end-anchored, so it must not classify as either kind.
+        let bannerWithNewline = Data("Welcome. Enter password: in the portal\r\n".utf8)
+        #expect(PasswordPromptDetector.classify(window: bannerWithNewline) == nil)
+
+        let passwordThenNewline = Data("Password:\n".utf8)
+        #expect(PasswordPromptDetector.classify(window: passwordThenNewline) == nil)
+    }
+
+    @Test("Instance classify() mirrors the static function through the rolling window")
+    func testInstanceClassifyMirrorsStatic() {
+        var detector = PasswordPromptDetector()
+        detector.append(Data("Enter passphrase for key '/x/id_rsa':".utf8))
+        #expect(detector.classify() == .passphrase)
+        #expect(detector.matches() == false)
+
+        detector.reset()
+        detector.append(Data("Password:".utf8))
+        #expect(detector.classify() == .password)
+        #expect(detector.matches() == true)
+    }
 }

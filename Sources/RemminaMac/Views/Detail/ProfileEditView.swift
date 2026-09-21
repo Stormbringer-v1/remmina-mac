@@ -20,6 +20,8 @@ struct ProfileEditView: View {
     @State private var username = ""
     @State private var password = ""
     @State private var passwordDirty = false  // Track if user actually modified password
+    @State private var removeSavedPassword = false  // Explicit "remove saved password" request
+    @State private var hasStoredSecret = false  // Whether a secret currently exists for this profile (edit mode only)
     @State private var domain = ""
     @State private var notes = ""
     @State private var tagsText = ""
@@ -137,9 +139,26 @@ struct ProfileEditView: View {
                                 SecureField(isEditing ? "Leave blank to keep current" : "Optional", text: $password)
                                     .textFieldStyle(.roundedBorder)
                                     .accessibilityLabel("Password")
-                                    .onChange(of: password) { _, _ in
+                                    .disabled(removeSavedPassword)
+                                    .onChange(of: password) { _, newValue in
                                         passwordDirty = true
+                                        // Typing a new password overrides an
+                                        // earlier "remove saved password" request.
+                                        if !newValue.isEmpty {
+                                            removeSavedPassword = false
+                                        }
                                     }
+                            }
+
+                            if hasStoredSecret && credentialStore.persists {
+                                HStack {
+                                    Spacer().frame(width: 80)
+                                    Toggle("Remove saved password", isOn: $removeSavedPassword)
+                                        .onChange(of: removeSavedPassword) { _, newValue in
+                                            if newValue { password = "" }
+                                        }
+                                    Spacer()
+                                }
                             }
 
                             if !credentialStore.persists {
@@ -290,6 +309,8 @@ struct ProfileEditView: View {
             connectOnOpen = profile.connectOnOpen
             sshKeyPath = profile.sshKeyPath
             passwordDirty = false  // Reset dirty flag for edit mode
+            removeSavedPassword = false
+            hasStoredSecret = (try? credentialStore.hasSecret(.password, for: profile.id)) ?? false
         } else {
             port = "\(protocolType.defaultPort)"
         }
@@ -317,7 +338,18 @@ struct ProfileEditView: View {
 
         do {
             let valid = try draft.validated()
-            let passwordToSave: String? = passwordDirty ? password : nil
+            // An empty field means "keep the current password" — typing then
+            // erasing it must not be indistinguishable from an explicit
+            // removal request. Only a non-empty typed password, or the
+            // explicit "Remove saved password" toggle, changes anything.
+            let passwordToSave: String?
+            if removeSavedPassword {
+                passwordToSave = ""
+            } else if passwordDirty && !password.isEmpty {
+                passwordToSave = password
+            } else {
+                passwordToSave = nil
+            }
 
             switch mode {
             case .create:

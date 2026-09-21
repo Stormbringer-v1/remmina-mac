@@ -49,17 +49,19 @@ struct SecurityTests {
         }
     }
     
-    @Test("Block IPv4-mapped IPv6 ::ffff:127.0.0.1")
-    func testBlockIPv4MappedIPv6Loopback() {
-        // ::ffff:127.0.0.1 resolves to loopback via IPv6
-        // IPv6Address may or may not parse this - if it does, loopback check should catch it
-        do {
-            _ = try HostnameValidator.validate("::ffff:127.0.0.1")
-            // If it didn't throw, that's a security gap we should know about
-            // but some platforms don't resolve this
-        } catch {
-            // Expected — any error is acceptable (blocking is correct)
+    @Test("IPv4-mapped IPv6 ::ffff:127.0.0.1 is blocked as loopback only when blockLocalhost is set")
+    func testBlockIPv4MappedIPv6Loopback() throws {
+        // ::ffff:127.0.0.1 resolves to loopback via the embedded IPv4 address;
+        // HostnameValidator maps it and re-applies the IPv4 rules, so it must
+        // be rejected exactly when a plain "127.0.0.1" would be.
+        #expect(throws: HostnameValidator.ValidationError.blockedLoopback) {
+            try HostnameValidator.validate("::ffff:127.0.0.1", blockLocalhost: true)
         }
+
+        // With defaults (blockLocalhost: false), loopback is not blocked, so
+        // this must succeed and return the trimmed input unchanged.
+        let result = try HostnameValidator.validate("::ffff:127.0.0.1")
+        #expect(result == "::ffff:127.0.0.1")
     }
     
     @Test("Block scheme-prefixed URLs")
@@ -134,81 +136,100 @@ struct SecurityTests {
     
     // MARK: - Keychain Edge Cases
     
+    /// Per-test random-service KeychainStore — never touches the developer's
+    /// real login keychain (the production service name).
+    private func makeTestKeychainStore() -> KeychainStore {
+        KeychainStore(service: "com.stormbringer-v1.remminamac.tests." + UUID().uuidString)
+    }
+
     @Test("Unicode password round-trip through Keychain")
     func testKeychainUnicodePassword() throws {
-        let store = KeychainStore.shared
+        let store = makeTestKeychainStore()
         let profileId = UUID()
         let unicodePassword = "пароль🔐中文密码"
-        
+        defer { store.deletePassword(for: profileId) }
+
         let saved = store.savePassword(unicodePassword, for: profileId)
         #expect(saved == true)
-        
+
         let retrieved = try store.password(for: profileId)
         #expect(retrieved == unicodePassword)
-        
-        store.deletePassword(for: profileId)
     }
-    
+
     @Test("Very long password through Keychain")
     func testKeychainLongPassword() throws {
-        let store = KeychainStore.shared
+        let store = makeTestKeychainStore()
         let profileId = UUID()
         let longPassword = String(repeating: "A", count: 10_000) // 10KB
-        
+        defer { store.deletePassword(for: profileId) }
+
         let saved = store.savePassword(longPassword, for: profileId)
         #expect(saved == true)
-        
+
         let retrieved = try store.password(for: profileId)
         #expect(retrieved == longPassword)
-        
-        store.deletePassword(for: profileId)
     }
-    
+
     @Test("Special characters password through Keychain")
     func testKeychainSpecialCharsPassword() throws {
-        let store = KeychainStore.shared
+        let store = makeTestKeychainStore()
         let profileId = UUID()
         let specialPassword = #"p@$$w0rd!<>"'\&|;`$()"#
-        
+        defer { store.deletePassword(for: profileId) }
+
         let saved = store.savePassword(specialPassword, for: profileId)
         #expect(saved == true)
-        
+
         let retrieved = try store.password(for: profileId)
         #expect(retrieved == specialPassword)
-        
-        store.deletePassword(for: profileId)
     }
-    
+
     @Test("Empty string password through Keychain")
     func testKeychainEmptyPassword() throws {
-        let store = KeychainStore.shared
+        let store = makeTestKeychainStore()
         let profileId = UUID()
-        
+        defer { store.deletePassword(for: profileId) }
+
         let saved = store.savePassword("", for: profileId)
         #expect(saved == true)
-        
+
         let retrieved = try store.password(for: profileId)
         #expect(retrieved == "")
-        
-        store.deletePassword(for: profileId)
     }
     
     // MARK: - Import Hardening
     
-    @Test("Import rejects deeply nested JSON")
+    @Test("Import rejects a profile whose tags field is genuinely deeply nested JSON, without crashing")
     func testRejectDeeplyNestedJSON() {
-        // Create valid shell but with deeply nested unexpected structures
+        // `tags` is declared as `[String]`; feed it 200 levels of nested
+        // arrays instead. ProfileDTO's Codable init is strict (unknown keys
+        // and type mismatches both throw), so this must fail with a decoding
+        // error rather than parse successfully — and it must not hang or
+        // crash on the recursion itself.
+        let depth = 200
+        let nestedTags = String(repeating: "[", count: depth) + String(repeating: "]", count: depth)
         let json = """
-        {"version": 1, "exportDate": "2026-01-01T00:00:00Z", "profiles": []}
+        {"version": 1, "exportDate": "2026-01-01T00:00:00Z", "profiles": [{
+            "name": "Test",
+            "protocolType": "SSH",
+            "host": "example.com",
+            "port": 22,
+            "username": "admin",
+            "domain": "",
+            "notes": "",
+            "tags": \(nestedTags),
+            "isFavorite": false,
+            "connectOnOpen": false
+        }]}
         """
         let data = Data(json.utf8)
-        // This should succeed (empty profiles array is valid)
-        let profiles = try? ProfileImportExport.importProfiles(from: data)
-        #expect(profiles != nil)
-        #expect(profiles?.count == 0)
+
+        #expect(throws: (any Error).self) {
+            _ = try ProfileImportExport.importProfiles(from: data)
+        }
     }
     
-    @Test("Import rejects SQL injection in name field")
+    @Test("Import accepts SQL-injection-shaped text in the name field as inert data and round-trips it unchanged")
     func testImportSQLInjectionInName() throws {
         let json = """
         {
@@ -236,7 +257,7 @@ struct SecurityTests {
         #expect(profiles[0].name == "'; DROP TABLE profiles; --")
     }
     
-    @Test("Import rejects XSS payload in notes field")
+    @Test("Import accepts an HTML/JS-shaped payload in the notes field as inert data and round-trips it unchanged")
     func testImportXSSInNotes() throws {
         let json = """
         {
@@ -321,24 +342,14 @@ struct SecurityTests {
     }
     
     // MARK: - Password Exposure Prevention
-    
-    @Test("Log entries never contain password strings")
-    func testLogNeverContainsPasswords() {
-        let logger = AppLogger.shared
-        let testPassword = "SuperSecret123!@#"
-        
-        // Simulate various log calls that happen during connection
-        logger.log("SSH: Connecting to admin@example.com")
-        logger.log("SSH: Askpass configured for credential handling")
-        logger.log("SSH: Connected to example.com")
-        
-        // Verify no log entry contains the password
-        for entry in logger.entries {
-            #expect(!entry.message.contains(testPassword),
-                    "Log entry should never contain password text")
-        }
-    }
-    
+
+    // (A prior "Log entries never contain password strings" test lived here.
+    // It logged strings that never contained the password and then asserted
+    // they didn't — it could not fail, so it proved nothing. The meaningful
+    // version of this check — that a real credential-handling call site
+    // (SSHSession init, KeychainStore save/get/delete) never passes the
+    // password to AppLogger — lives in C2AuditTests.)
+
     @Test("SessionStatus displays sanitized information")
     func testSessionStatusSanitized() {
         let status1 = SessionStatus.connected

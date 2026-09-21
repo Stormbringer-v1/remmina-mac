@@ -374,6 +374,111 @@ struct ImportValidationTests {
         }
     }
 
+    // MARK: - Profile id round-trip and validation
+
+    @Test("Export then import preserves each profile's id")
+    func testExportImportPreservesId() throws {
+        let original = ConnectionProfile(
+            name: "Keep My Id",
+            protocolType: .ssh,
+            host: "example.com",
+            port: 22,
+            username: "admin"
+        )
+
+        guard let exportData = ProfileImportExport.exportProfiles([original]) else {
+            #expect(Bool(false), "Export should not return nil")
+            return
+        }
+        let imported = try ProfileImportExport.importProfiles(from: exportData)
+        #expect(imported.count == 1)
+        #expect(imported[0].id == original.id)
+    }
+
+    @Test("Import without an id field (legacy export) still imports, minting a fresh id each time")
+    func testImportLegacyExportWithoutIdGeneratesFreshUUID() throws {
+        let json = """
+        {
+            "version": 1,
+            "exportDate": "2026-01-01T00:00:00Z",
+            "profiles": [{
+                "name": "Legacy",
+                "protocolType": "SSH",
+                "host": "example.com",
+                "port": 22,
+                "username": "admin",
+                "domain": "",
+                "notes": "",
+                "tags": [],
+                "isFavorite": false,
+                "connectOnOpen": false
+            }]
+        }
+        """
+        let data = Data(json.utf8)
+
+        let firstImport = try ProfileImportExport.importProfiles(from: data)
+        let secondImport = try ProfileImportExport.importProfiles(from: data)
+        #expect(firstImport.count == 1)
+        #expect(secondImport.count == 1)
+        // No id in the source at all: each import mints its own fresh id
+        // rather than deriving (or reusing) one from the file's content.
+        #expect(firstImport[0].id != secondImport[0].id)
+    }
+
+    @Test("Import rejects a profile whose id is not a well-formed UUID string")
+    func testImportRejectsMalformedId() throws {
+        let json = """
+        {
+            "version": 1,
+            "exportDate": "2026-01-01T00:00:00Z",
+            "profiles": [{
+                "id": "not-a-uuid",
+                "name": "Test",
+                "protocolType": "SSH",
+                "host": "example.com",
+                "port": 22,
+                "username": "admin",
+                "domain": "",
+                "notes": "",
+                "tags": [],
+                "isFavorite": false,
+                "connectOnOpen": false
+            }]
+        }
+        """
+        let data = Data(json.utf8)
+
+        do {
+            _ = try ProfileImportExport.importProfiles(from: data)
+            #expect(Bool(false), "Should have thrown error")
+        } catch is ProfileImportExport.ImportError {
+            // Expected
+        }
+    }
+
+    @Test("Importing the same export twice yields profiles with matching ids, so a caller can dedupe")
+    func testImportSameExportTwiceYieldsSameIds() throws {
+        let original = ConnectionProfile(
+            name: "Dedupe Target",
+            protocolType: .ssh,
+            host: "example.com",
+            port: 22,
+            username: "admin"
+        )
+        guard let exportData = ProfileImportExport.exportProfiles([original]) else {
+            #expect(Bool(false), "Export should not return nil")
+            return
+        }
+
+        let firstImport = try ProfileImportExport.importProfiles(from: exportData)
+        let secondImport = try ProfileImportExport.importProfiles(from: exportData)
+        #expect(firstImport.count == 1)
+        #expect(secondImport.count == 1)
+        #expect(firstImport[0].id == original.id)
+        #expect(firstImport[0].id == secondImport[0].id)
+    }
+
     // MARK: - ISSUE-001: import with a missing SSH key
 
     /// End-to-end: parse an export whose sshKeyPath points at a file that
@@ -439,7 +544,7 @@ struct ImportValidationTests {
             .urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs/RemminaMac/RemminaMac.log")
         var sawWarning = false
-        let deadline = Date().addingTimeInterval(5.0)
+        let deadline = Date().addingTimeInterval(5.0 * ciDeadlineScale)
         while Date() < deadline {
             if let contents = try? String(contentsOf: logFileURL, encoding: .utf8),
                contents.split(separator: "\n").contains(where: { line in

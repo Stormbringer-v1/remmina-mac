@@ -28,6 +28,7 @@ struct MainView: View {
     @State private var profileStore: ProfileStore?
     @State private var importAlert = false
     @State private var importCount = 0
+    @State private var importSkippedCount = 0
     @State private var showingDeleteConfirmation = false
     @State private var profileToDelete: ConnectionProfile?
     @State private var validationError: String?
@@ -152,7 +153,7 @@ struct MainView: View {
         .alert("Import Successful", isPresented: $importAlert) {
             Button("OK") {}
         } message: {
-            Text("Imported \(importCount) profile\(importCount == 1 ? "" : "s") successfully.")
+            Text("Imported \(importCount) profile\(importCount == 1 ? "" : "s"), skipped \(importSkippedCount) profile\(importSkippedCount == 1 ? "" : "s") already in the library.")
         }
         // Delete confirmation dialog
         .alert("Delete Profile", isPresented: $showingDeleteConfirmation) {
@@ -309,13 +310,45 @@ struct MainView: View {
         showingDeleteConfirmation = true
     }
 
-    /// Actually performs the deletion after user confirms
+    /// Actually performs the deletion after user confirms.
+    ///
+    /// Order matters: close every live session for this profile first (a
+    /// session must never outlive the profile it's connected from), then
+    /// delete the SwiftData model and save. Only once that save actually
+    /// succeeds — `saveOrRollback()` can roll back — do we delete the
+    /// stored credentials; deleting them first (the old order) meant a
+    /// rolled-back save left a profile with no password.
     private func performDelete(_ profile: ConnectionProfile) {
-        try? credentialStore.deleteAll(for: profile.id)
-        if selectedProfile?.id == profile.id {
+        guard let profileStore else {
+            AppLogger.shared.log("Delete requested before profileStore was ready — ignoring", level: .error)
+            return
+        }
+        let profileId = profile.id
+
+        for session in connectionManager.sessions where session.profileId == profileId {
+            connectionManager.closeSession(byId: session.id)
+        }
+
+        if selectedProfile?.id == profileId {
             selectedProfile = nil
         }
-        profileStore?.delete(profile)
+
+        modelContext.delete(profile)
+        do {
+            try profileStore.saveOrRollback()
+            AppLogger.shared.log("Profile deleted: \(profile.name)", profileId: profileId)
+            // The profile row is gone either way at this point; a failure to
+            // delete its credentials shouldn't be reported as a delete
+            // failure — just log it and move on.
+            do {
+                try credentialStore.deleteAll(for: profileId)
+            } catch {
+                AppLogger.shared.log("Failed to delete credentials for profile \(profileId): \(error.localizedDescription)", level: .error, profileId: profileId)
+            }
+        } catch {
+            validationError = "Unable to delete \"\(profile.name)\": \(error.localizedDescription)"
+            showingValidationError = true
+        }
     }
 
     /// Auto-connect profiles marked "Connect on open" at app launch
@@ -372,10 +405,21 @@ struct MainView: View {
         if panel.runModal() == .OK, let url = panel.url {
             do {
                 let imported = try ProfileImportExport.importFromFile(url)
+                // Re-importing the same export used to duplicate every
+                // profile: skip anything whose id already exists among the
+                // current profiles (from @Query'd `allProfiles`), and also
+                // track ids added earlier in this same pass so a file that
+                // repeats an id internally doesn't create two rows for it.
+                var seenIds = Set(allProfiles.map(\.id))
                 var successCount = 0
+                var skippedCount = 0
                 var failedProfiles: [(String, String)] = []
-                
+
                 for profile in imported {
+                    if seenIds.contains(profile.id) {
+                        skippedCount += 1
+                        continue
+                    }
                     do {
                         // PROBLEMS.md ISSUE-001: an imported profile's SSH
                         // key almost never lives at the same path on this
@@ -385,20 +429,28 @@ struct MainView: View {
                         // the strict default.
                         try profileStore?.add(profile, allowMissingSSHKey: true)
                         successCount += 1
+                        seenIds.insert(profile.id)
                     } catch {
                         failedProfiles.append((profile.name, error.localizedDescription))
                     }
                 }
-                
-                if successCount > 0 {
-                    importCount = successCount
-                    importAlert = true
-                }
-                
+
+                // Exactly one alert must fire per import pass. A failure
+                // takes priority (it folds in the imported/skipped counts
+                // too) since it's the more actionable outcome; otherwise the
+                // success alert reports imported vs. skipped counts.
                 if !failedProfiles.isEmpty {
-                    let errorMsg = failedProfiles.map { "• \($0.0): \($0.1)" }.joined(separator: "\n")
-                    validationError = "Failed to import \(failedProfiles.count) profile(s):\n\n\(errorMsg)"
+                    var errorMsg = "Failed to import \(failedProfiles.count) profile(s):\n\n"
+                    errorMsg += failedProfiles.map { "• \($0.0): \($0.1)" }.joined(separator: "\n")
+                    if successCount > 0 || skippedCount > 0 {
+                        errorMsg += "\n\n(\(successCount) imported, \(skippedCount) already in the library and skipped.)"
+                    }
+                    validationError = errorMsg
                     showingValidationError = true
+                } else if successCount > 0 || skippedCount > 0 {
+                    importCount = successCount
+                    importSkippedCount = skippedCount
+                    importAlert = true
                 }
             } catch let error as ProfileImportExport.ImportError {
                 validationError = error.localizedDescription

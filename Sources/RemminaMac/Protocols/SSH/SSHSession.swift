@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// SSH session that runs `/usr/bin/ssh` on a pseudo-terminal.
 ///
@@ -34,6 +35,11 @@ final class SSHSession: SessionProtocol {
     /// but dropping the reference is the best the language allows.
     private var password: String?
     let effectiveKeyPath: String
+    /// Set at construction when `SSHKeyValidator` rejects the profile's
+    /// configured key (bad permissions, path traversal, missing file, …).
+    /// `connect()` checks this before spawning ssh so a rejected key fails
+    /// fast and visibly instead of silently falling back to the agent.
+    private let keyValidationError: String?
 
     /// Direct byte feed handler for SwiftTerm — bypasses string conversion.
     var terminalFeedHandler: ((Data) -> Void)?
@@ -50,6 +56,23 @@ final class SSHSession: SessionProtocol {
     /// will be answered. Touched only on the read queue.
     private var passwordHandled = false
 
+    /// Whether PTY output is still scanned for password/passphrase prompts.
+    /// Armed just before ssh is spawned and cleared once the session is
+    /// promoted to `.connected` or torn down: ssh only prompts before
+    /// authentication, and scanning an interactive shell afterwards would
+    /// misfire on remote programs that print their own "passphrase:"
+    /// prompts (ssh-keygen, gpg). Lock-protected because it is cleared on
+    /// the main queue and read on the read queue.
+    private let promptScanEnabled = OSAllocatedUnfairLock<Bool>(initialState: false)
+
+    /// Bounded ring of the most recent PTY output, used only to classify a
+    /// non-zero exit via `diagnose(...)` — never shown to the user verbatim.
+    /// Appended from the read queue, read from the main-queue exit handler,
+    /// hence the lock (VNCSession uses the same primitive for state that
+    /// crosses those two threads).
+    private let recentOutputLock = OSAllocatedUnfairLock<String>(initialState: "")
+    private static let recentOutputMaxChars = 4096
+
     init(profile: ConnectionProfile, password: String?) {
         self.profileId = profile.id
         self.profileName = profile.name
@@ -61,12 +84,15 @@ final class SSHSession: SessionProtocol {
         if !profile.sshKeyPath.isEmpty {
             do {
                 self.effectiveKeyPath = try SSHKeyValidator.validate(profile.sshKeyPath, isUserSelected: true)
+                self.keyValidationError = nil
             } catch {
                 AppLogger.shared.log("SSH key validation failed: \(error.localizedDescription)", level: .warning, profileId: profile.id, component: "SSHSession")
                 self.effectiveKeyPath = ""
+                self.keyValidationError = "SSH key \(profile.sshKeyPath) can't be used: \(error.localizedDescription)"
             }
         } else {
             self.effectiveKeyPath = ""
+            self.keyValidationError = nil
         }
     }
 
@@ -76,6 +102,11 @@ final class SSHSession: SessionProtocol {
 
     func connect() {
         guard status != .connected && status != .connecting else { return }
+        if let keyValidationError {
+            status = .error(keyValidationError)
+            AppLogger.shared.log("SSH: \(keyValidationError)", level: .error, sessionId: id, profileId: profileId, component: "SSHSession")
+            return
+        }
         status = .connecting
         AppLogger.shared.log("SSH: Connecting to \(hostDescription)", sessionId: id, profileId: profileId, component: "SSHSession")
         startConnectionTimeout()
@@ -207,6 +238,9 @@ final class SSHSession: SessionProtocol {
             DispatchQueue.main.async {
                 guard self.status == .connecting else { return }
                 self.cancelConnectionTimeout()
+                // Authentication is behind us: any later "password:" or
+                // "passphrase:" text is the remote shell's business.
+                self.promptScanEnabled.withLock { $0 = false }
                 self.status = .connected
                 AppLogger.shared.log("SSH: Connected to \(self.host)", sessionId: self.id, profileId: self.profileId, component: "SSHSession")
             }
@@ -222,6 +256,7 @@ final class SSHSession: SessionProtocol {
         cancelConnectionTimeout()
         connectedWorkItem?.cancel()
         connectedWorkItem = nil
+        promptScanEnabled.withLock { $0 = false }
         pty.terminate()
         pty.closeMaster()
     }
@@ -255,6 +290,8 @@ final class SSHSession: SessionProtocol {
 
         AppLogger.shared.log("SSH: Connecting to \(hostDescription)", sessionId: id, profileId: profileId, component: "SSHSession")
 
+        promptScanEnabled.withLock { $0 = true }
+
         do {
             let readQueue = DispatchQueue.global(qos: .userInteractive)
             try pty.launch(path: path, args: args, env: env, onExit: { [weak self] code in
@@ -264,6 +301,7 @@ final class SSHSession: SessionProtocol {
                 DispatchQueue.main.async {
                     self.terminalFeedHandler?(data)
                 }
+                self.recordRecentOutput(data)
                 self.handlePossiblePasswordPrompt(in: data, on: readQueue)
             }, onEOF: { [weak self] in
                 guard let self = self else { return }
@@ -292,11 +330,17 @@ final class SSHSession: SessionProtocol {
     private func handleProcessExit(_ exitCode: Int32) {
         cancelConnectionTimeout()
         connectedWorkItem?.cancel()
-        if status != .disconnected {
-            if exitCode != 0 && status == .connecting {
-                status = .error("SSH exited with code \(exitCode) before authenticating — verify credentials, host, and network")
+        let statusBeforeExit = status
+        if statusBeforeExit != .disconnected {
+            if case .error = statusBeforeExit {
+                // A more specific error (e.g. a passphrase-protected key,
+                // surfaced by handlePassphrasePrompt) already won; don't
+                // clobber it with a generic exit-code message. Mirrors
+                // VNCSession.fail(_:), which never overwrites an existing
+                // .error.
             } else if exitCode != 0 {
-                status = .error("SSH session ended (exit code \(exitCode))")
+                let recentOutput = recentOutputLock.withLock { $0 }
+                status = .error(Self.diagnose(exitCode: exitCode, recentOutput: recentOutput, wasConnecting: statusBeforeExit == .connecting))
             } else {
                 status = .disconnected
             }
@@ -307,16 +351,26 @@ final class SSHSession: SessionProtocol {
 
     // MARK: - PTY reading + password-prompt detection
 
-    /// Detects ssh's password prompt and writes the stored password only when
-    /// detector matches AND echoEnabled == false (ISSUE-005).
+    /// Detects ssh's password and passphrase prompts. A password prompt gets
+    /// the stored password written back only when the detector matches AND
+    /// echoEnabled == false (ISSUE-005). A passphrase prompt (key-based auth
+    /// with no passphrase support) is fatal — see `handlePassphrasePrompt()`.
     private func handlePossiblePasswordPrompt(in chunk: Data, on queue: DispatchQueue) {
-        guard !passwordHandled else { return }
-        guard let pwd = password, !pwd.isEmpty else {
+        guard !passwordHandled, promptScanEnabled.withLock({ $0 }) else { return }
+
+        detector.append(chunk)
+
+        if detector.classify() == .passphrase {
             passwordHandled = true
+            handlePassphrasePrompt()
             return
         }
 
-        detector.append(chunk)
+        // No stored password: there is nothing to answer a password prompt
+        // with, but keep scanning — a passphrase prompt (handled above) can
+        // still arrive after banner or known_hosts lines. Marking the prompt
+        // handled here would stop scanning after the very first chunk.
+        guard let pwd = password, !pwd.isEmpty else { return }
 
         guard detector.matches() else { return }
 
@@ -339,5 +393,98 @@ final class SSHSession: SessionProtocol {
         pty.write(Data((pwd + "\n").utf8))
         self.password = nil
         detector.reset()
+    }
+
+    /// A configured key needs a passphrase to unlock it, and this app has no
+    /// passphrase support yet. Left alone, ssh just sits at the prompt until
+    /// it eventually gives up and the user sees a bare "Permission denied
+    /// (publickey)" with no indication why. Terminate now and say exactly
+    /// what's wrong and how to fix it.
+    private func handlePassphrasePrompt() {
+        let keyPath: String
+        if !effectiveKeyPath.isEmpty {
+            keyPath = effectiveKeyPath
+        } else if let extracted = Self.extractQuotedKeyPath(from: detector.window) {
+            keyPath = extracted
+        } else {
+            keyPath = "the SSH key"
+        }
+        let message = "Key \(keyPath) is passphrase-protected and not loaded in ssh-agent. Run: ssh-add --apple-use-keychain \(keyPath)"
+
+        cleanupAllResources()
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.status = .error(message)
+            AppLogger.shared.log("SSH: \(message)", level: .error, sessionId: self.id, profileId: self.profileId, component: "SSHSession")
+        }
+    }
+
+    /// Extracts the single-quoted path from ssh's passphrase prompt, e.g.
+    /// `Enter passphrase for key '/Users/x/.ssh/id_ed25519':` -> the text
+    /// between the quotes. Returns nil if no quoted path is present.
+    private static func extractQuotedKeyPath(from window: Data) -> String? {
+        guard let text = String(data: window, encoding: .utf8) else { return nil }
+        // Only the trailing line is the prompt. Earlier output in the window
+        // (banners, "user's password:" from a previous attempt) may contain
+        // quotes of its own.
+        let line = text
+            .split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .last
+            .map(String.init) ?? text
+        guard let firstQuote = line.firstIndex(of: "'") else { return nil }
+        let afterFirst = line.index(after: firstQuote)
+        guard let secondQuote = line[afterFirst...].firstIndex(of: "'") else { return nil }
+        let path = String(line[afterFirst..<secondQuote])
+        return path.isEmpty ? nil : path
+    }
+
+    // MARK: - Exit diagnostics
+
+    /// Appends to the bounded recent-output ring (read only by `diagnose`
+    /// via `handleProcessExit`), trimming from the front once it exceeds
+    /// `recentOutputMaxChars`. Called from the read queue.
+    private func recordRecentOutput(_ data: Data) {
+        guard let text = String(data: data, encoding: .utf8) else { return }
+        recentOutputLock.withLock { buffer in
+            buffer += text
+            if buffer.count > Self.recentOutputMaxChars {
+                buffer.removeFirst(buffer.count - Self.recentOutputMaxChars)
+            }
+        }
+    }
+
+    /// Maps a non-zero ssh exit code and the most recent PTY output to an
+    /// actionable diagnosis. Pure and side-effect free, so it's fully
+    /// testable without spawning a process. Matching is a case-insensitive
+    /// substring check against known ssh/OpenSSH failure phrasing; the raw
+    /// `recentOutput` buffer is never included in the returned message —
+    /// only the fixed wording below.
+    static func diagnose(exitCode: Int32, recentOutput: String, wasConnecting: Bool) -> String {
+        let lower = recentOutput.lowercased()
+
+        let reason: String?
+        if lower.contains("permission denied") {
+            reason = "authentication failed — check username, password, or key"
+        } else if lower.contains("host key verification failed") || lower.contains("remote host identification has changed") {
+            reason = "host key problem: the server's key changed or is untrusted; check ~/.ssh/known_hosts"
+        } else if lower.contains("could not resolve hostname") {
+            reason = "DNS lookup failed"
+        } else if lower.contains("connection refused") {
+            reason = "nothing is listening on that port"
+        } else if lower.contains("connection timed out") || lower.contains("operation timed out") {
+            reason = "network timeout"
+        } else if lower.contains("no route to host") || lower.contains("network is unreachable") {
+            reason = "network unreachable"
+        } else {
+            reason = nil
+        }
+
+        if let reason {
+            return "SSH exited with code \(exitCode) — \(reason)"
+        }
+
+        return wasConnecting
+            ? "SSH exited with code \(exitCode) before authenticating — verify credentials, host, and network"
+            : "SSH session ended (exit code \(exitCode))"
     }
 }

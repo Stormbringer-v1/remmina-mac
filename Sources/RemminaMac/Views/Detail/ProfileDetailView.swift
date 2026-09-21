@@ -59,7 +59,10 @@ struct ProfileDetailView: View {
         // Re-read when the user flips Settings → Security → Credential
         // Storage while this same profile stays on screen (e.g. None →
         // Keychain → back to a profile that now has a stored password).
-        .onChange(of: credentialStore.persists) { _, _ in refreshHasStoredPassword() }
+        // Keyed on the backend identity, not `credentialStore.persists`:
+        // a Keychain → EncryptedFile switch (both `persists == true`) would
+        // otherwise be missed entirely.
+        .onChange(of: SecuritySettings.shared.credentialBackend) { _, _ in refreshHasStoredPassword() }
     }
 
     // MARK: - Sections
@@ -234,11 +237,10 @@ struct ProfileDetailView: View {
         // disabled" caption is rendered directly from `credentialStore.persists`.
         guard credentialStore.persists else { return }
         do {
-            if try credentialStore.secret(.password, for: profile.id) != nil {
-                passwordStatus = .stored
-            } else {
-                passwordStatus = .notSet
-            }
+            // `hasSecret` (not `secret`) — merely checking existence must
+            // not pull the password itself into memory or risk a Keychain
+            // ACL prompt just from selecting a row.
+            passwordStatus = try credentialStore.hasSecret(.password, for: profile.id) ? .stored : .notSet
         } catch {
             passwordStatus = .accessDenied
         }

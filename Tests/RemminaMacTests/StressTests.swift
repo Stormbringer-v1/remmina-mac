@@ -25,7 +25,7 @@ struct StressTests {
         // at 1000) and the new entries are present in the buffer.
         var finalCount = 0
         var containsRecent = false
-        for _ in 0..<40 {
+        for _ in 0..<pollIterations(40) {
             finalCount = await MainActor.run { logger.entries.count }
             containsRecent = await MainActor.run {
                 logger.entries.contains { $0.message == "Stress test entry 1499" }
@@ -59,7 +59,7 @@ struct StressTests {
 
         // Each level should be accepted and stored in the ring buffer.
         var found: [String: Bool] = [:]
-        for _ in 0..<40 {
+        for _ in 0..<pollIterations(40) {
             found = await MainActor.run {
                 var result: [String: Bool] = [:]
                 result[token1] = logger.entries.contains { $0.message == token1 }
@@ -78,57 +78,128 @@ struct StressTests {
     }
     
     @Test("Logger handles correlation IDs")
-    func testLoggerCorrelationIDs() {
+    func testLoggerCorrelationIDs() async throws {
         let logger = AppLogger.shared
         let sessionId = UUID()
         let profileId = UUID()
-        
+
+        let token1 = "corr-test1-\(UUID().uuidString)"
+        let token2 = "corr-test2-\(UUID().uuidString)"
+        let token3 = "corr-test3-\(UUID().uuidString)"
+        let token4 = "corr-test4-\(UUID().uuidString)"
+        let token5 = "corr-test5-\(UUID().uuidString)"
+
         // Log with all correlation ID combinations
-        logger.log("Test 1", sessionId: sessionId)
-        logger.log("Test 2", profileId: profileId)
-        logger.log("Test 3", sessionId: sessionId, profileId: profileId)
-        logger.log("Test 4", sessionId: sessionId, profileId: profileId, component: "TestComponent")
-        logger.log("Test 5", component: "StandaloneComponent")
-        
-        // Should not crash
+        logger.log(token1, sessionId: sessionId)
+        logger.log(token2, profileId: profileId)
+        logger.log(token3, sessionId: sessionId, profileId: profileId)
+        logger.log(token4, sessionId: sessionId, profileId: profileId, component: "TestComponent")
+        logger.log(token5, component: "StandaloneComponent")
+
+        // Correlation IDs only affect the on-disk formatted line
+        // ("[sessionId=..., profileId=..., component=...]"), not the
+        // in-memory LogEntry, so the log file is the only place they can be
+        // checked at all — and it also sidesteps a real flake: `logger.entries`
+        // is a shared, 1000-entry ring buffer that `testLoggerRingBuffer`
+        // (same suite, not `.serialized`) floods with 1500 entries; polling
+        // it for specific tokens is exactly what ConnectionManagerTests'
+        // RDP-factory test and ImportValidationTests' missing-SSH-key test
+        // document failing under the full parallel run. The log file is
+        // append-only and every token here is UUID-suffixed, so a match
+        // can't be a stale line from a previous run.
+        let logFileURL = FileManager.default
+            .urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs/RemminaMac/RemminaMac.log")
+
+        let sid8 = sessionId.uuidString.prefix(8)
+        let pid8 = profileId.uuidString.prefix(8)
+        let expectations: [(token: String, mustContain: [String])] = [
+            (token1, ["sessionId=\(sid8)"]),
+            (token2, ["profileId=\(pid8)"]),
+            (token3, ["sessionId=\(sid8)", "profileId=\(pid8)"]),
+            (token4, ["sessionId=\(sid8)", "profileId=\(pid8)", "component=TestComponent"]),
+            (token5, ["component=StandaloneComponent"])
+        ]
+
+        var satisfied = Set<Int>()
+        let deadline = Date().addingTimeInterval(5.0 * ciDeadlineScale)
+        while Date() < deadline && satisfied.count < expectations.count {
+            if let contents = try? String(contentsOf: logFileURL, encoding: .utf8) {
+                let lines = contents.split(separator: "\n")
+                for (index, expectation) in expectations.enumerated() where !satisfied.contains(index) {
+                    if lines.contains(where: { line in
+                        line.contains(expectation.token) && expectation.mustContain.allSatisfy { line.contains($0) }
+                    }) {
+                        satisfied.insert(index)
+                    }
+                }
+            }
+            if satisfied.count == expectations.count { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        for (index, expectation) in expectations.enumerated() {
+            #expect(satisfied.contains(index),
+                    "Logger should have written a line for \(expectation.token) containing \(expectation.mustContain)")
+        }
     }
-    
-    @Test("Logger handles special characters in messages")
-    func testLoggerSpecialCharacters() {
+
+    @Test("Logger handles special characters in messages without crashing, and stores them intact")
+    func testLoggerSpecialCharacters() async throws {
         let logger = AppLogger.shared
-        
-        logger.log("Unicode: こんにちは 🔥 Привет")
-        logger.log("Newlines: line1\nline2\nline3")
-        logger.log("Tabs: col1\tcol2\tcol3")
-        logger.log("Empty string: ")
-        logger.log(String(repeating: "A", count: 10_000)) // Very long message
-        
-        // Should not crash
+        let runId = UUID().uuidString
+
+        let messages = [
+            "Unicode-\(runId): こんにちは 🔥 Привет",
+            "Newlines-\(runId): line1\nline2\nline3",
+            "Tabs-\(runId): col1\tcol2\tcol3",
+            "EmptyMarker-\(runId): ",
+            "Long-\(runId): " + String(repeating: "A", count: 10_000) // Very long message
+        ]
+        for message in messages {
+            logger.log(message)
+        }
+
+        // See testLoggerCorrelationIDs above: checks the on-disk log file
+        // rather than the shared `logger.entries` ring buffer, which
+        // `testLoggerRingBuffer` floods elsewhere in this same
+        // (unserialized) suite. Each message is UUID-suffixed so a match
+        // can't be a stale line from a previous run.
+        let logFileURL = FileManager.default
+            .urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs/RemminaMac/RemminaMac.log")
+
+        var found: Set<Int> = []
+        let deadline = Date().addingTimeInterval(5.0 * ciDeadlineScale)
+        while Date() < deadline && found.count < messages.count {
+            if let contents = try? String(contentsOf: logFileURL, encoding: .utf8) {
+                for (index, message) in messages.enumerated() where !found.contains(index) {
+                    if contents.contains(message) {
+                        found.insert(index)
+                    }
+                }
+            }
+            if found.count == messages.count { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        for (index, message) in messages.enumerated() {
+            #expect(found.contains(index), "Logger should store special-character message intact: \(message.prefix(40))")
+        }
     }
-    
+
     // MARK: - Profile Model Edge Cases
-    
-    @Test("Profile with maximum field lengths")
-    func testProfileMaxFieldLengths() {
-        let profile = ConnectionProfile(
-            name: String(repeating: "N", count: 100),
-            protocolType: .ssh,
-            host: "example.com",
-            port: 65535,
-            username: String(repeating: "U", count: 64),
-            domain: String(repeating: "D", count: 255),
-            notes: String(repeating: ".", count: 1000),
-            tags: (1...10).map { "tag\($0)" }
-        )
-        
-        #expect(profile.name.count == 100)
-        #expect(profile.username.count == 64)
-        #expect(profile.domain.count == 255)
-        #expect(profile.notes.count == 1000)
-        #expect(profile.tags.count == 10)
-        #expect(profile.port == 65535)
-    }
-    
+
+    // (A prior "Profile with maximum field lengths" test lived here. It only
+    // checked that the constructor stores exactly the strings it was given
+    // and that String(repeating:count:) has the expected .count — true by
+    // construction, not a property of ConnectionProfile. The model itself
+    // enforces no field-length limits by design; the max-length name/
+    // username/domain/notes/port case is covered meaningfully by
+    // testValidateMaxLengthProfile below (via ProfileValidator.validate,
+    // though that profile carries no tags), and the max-tag-count case by
+    // ProfileValidatorTests.testTooManyTagsThrows and
+    // ImportValidationTests.testRejectTooManyTags.)
+
     @Test("Profile with empty tags produces empty array")
     func testEmptyTagsSerialization() {
         let profile = ConnectionProfile(
@@ -142,21 +213,21 @@ struct StressTests {
         #expect(profile.tagsRawValue == "")
     }
     
-    @Test("Profile tags with commas in values")
+    @Test("Profile tags: a comma inside a tag's own text is stripped, not treated as a separator")
     func testTagsWithCommasInValues() {
-        // Tags are comma-separated, so commas in tag names would cause issues
+        // Tags are stored comma-joined with no escaping, so a comma left
+        // inside a tag's own text would be indistinguishable from the
+        // separator on the next read (2 tags in, 3 tags out). Commas are
+        // stripped from each tag's text so that can't happen.
         let profile = ConnectionProfile(
             name: "Test",
             protocolType: .ssh,
             host: "host",
             tags: ["web,server", "prod"]
         )
-        
-        // Current implementation joins with comma — this reveals the limitation
-        // The raw value would serialize incorrectly if tags contain commas
-        #expect(profile.tagsRawValue == "web,server,prod")
-        // Deserialized, this would produce 3 tags instead of 2
-        #expect(profile.tags.count == 3) // Known limitation documented here
+
+        #expect(profile.tagsRawValue == "webserver,prod")
+        #expect(profile.tags == ["webserver", "prod"])
     }
     
     @Test("Connection string with all combinations")
@@ -211,6 +282,7 @@ struct StressTests {
         #expect(imported.count == 1)
         
         let p = imported[0]
+        #expect(p.id == original.id)
         #expect(p.name == "Production DB")
         #expect(p.protocolType == .ssh)
         #expect(p.host == "db.example.com")
@@ -342,19 +414,24 @@ struct StressTests {
     
     // MARK: - Search Edge Cases
     
-    @Test("ConnectionProfile search query with special characters doesn't crash")
+    @Test("Profile fields with special characters remain searchable via localizedStandardContains without crashing")
     func testSearchSpecialCharacters() {
-        // This tests the model's string handling — actual SwiftData queries
-        // would need an in-memory container, but we verify no crashes here
+        // MainView's profile filter is `profile.name.localizedStandardContains(searchText)`
+        // (and the same for host/username/tagsRawValue). Exercise that exact
+        // predicate with special characters both in the field and in the
+        // search term, rather than only checking that the constructor stored
+        // the string unchanged.
         let profile = ConnectionProfile(
             name: "Test 'Quotes' & <Angles>",
             protocolType: .ssh,
             host: "example.com",
             username: "admin"
         )
-        
-        // Verify the profile's name stored correctly
-        #expect(profile.name == "Test 'Quotes' & <Angles>")
+
+        #expect(profile.name.localizedStandardContains("'Quotes'"))
+        #expect(profile.name.localizedStandardContains("<Angles>"))
+        #expect(profile.name.localizedStandardContains("&"))
+        #expect(!profile.name.localizedStandardContains("NotPresent"))
     }
 
     // MARK: - Validator Fuzzing
@@ -382,8 +459,11 @@ struct StressTests {
         }
         
         // 3. Random combinations
-        // Seeded RNG for deterministic tests
-        var rng = SystemRandomNumberGenerator()
+        // Seeded RNG for deterministic tests. SystemRandomNumberGenerator
+        // cannot be seeded, so a prior version of this test claimed
+        // determinism while actually fuzzing a different set of strings on
+        // every run.
+        var rng = SplitMix64(seed: 0x5EED_1234_ABCD_EF01)
         for _ in 0..<1000 {
             let length = Int.random(in: 1...500, using: &rng)
             var str = ""
@@ -471,5 +551,24 @@ struct StressTests {
 
         let terminal = SwiftTerm.TerminalView(frame: .zero)
         #expect(terminal is SessionFocusable)
+    }
+}
+
+/// Minimal deterministic RNG for the "seeded" fuzz test above.
+/// `SystemRandomNumberGenerator` cannot be seeded, so this exists to make
+/// the fuzz set reproducible across runs.
+private struct SplitMix64: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        self.state = seed
+    }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
     }
 }

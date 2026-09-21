@@ -30,23 +30,25 @@ struct RemminaMacApp: App {
         } catch {
             AppLogger.shared.log("Database corrupted: \(error). Backing up and attempting recovery.", level: .error)
 
+            // Back up by MOVING the corrupted store (and its -wal/-shm
+            // siblings) out of the way, then retry at the exact same
+            // (original) configuration/URL. The old behavior copied the
+            // corrupted file and created a NEW timestamped recovery store
+            // instead — the corrupted original was still sitting at the
+            // default URL, so every subsequent launch re-failed on it,
+            // re-backed-up, and piled up another recovery store, and
+            // anything written during recovery never migrated back.
             let backupPath = Self.backupCorruptedStore(storeURL: modelConfiguration.url)
             state.recoveryMode = true
             state.recoveryBackupPath = backupPath
 
-            let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? URL.applicationSupportDirectory
-            let recoveryURL = appSupport.appendingPathComponent("RemminaMac").appendingPathComponent("RemminaMac-Recovery-\(timestamp).store")
-
             do {
-                try? FileManager.default.createDirectory(at: recoveryURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let onDiskRecoveryConfig = ModelConfiguration(
-                    "RemminaMac-Recovery",
-                    schema: schema,
-                    url: recoveryURL
-                )
-                container = try ModelContainer(for: schema, configurations: [onDiskRecoveryConfig])
+                container = try ModelContainer(for: schema, configurations: [modelConfiguration])
+                // Recovered onto a fresh on-disk store at the original
+                // location — changes save normally from here on.
+                state.recoveryIsInMemoryOnly = false
             } catch {
+                AppLogger.shared.log("Recovery at the original store location also failed: \(error). Falling back to an in-memory store.", level: .error)
                 do {
                     let fallbackConfig = ModelConfiguration(
                         "RemminaMac-Recovery",
@@ -54,6 +56,9 @@ struct RemminaMacApp: App {
                         isStoredInMemoryOnly: true
                     )
                     container = try ModelContainer(for: schema, configurations: [fallbackConfig])
+                    // Only this final fallback actually loses data — nothing
+                    // typed this session will be saved anywhere on disk.
+                    state.recoveryIsInMemoryOnly = true
                 } catch {
                     fatalError("Cannot create even in-memory store: \(error)")
                 }
@@ -65,6 +70,9 @@ struct RemminaMacApp: App {
     }
 
     /// Backs up corrupted store files to ~/Library/Application Support/RemminaMac/Backups/<ISO8601 timestamp>/
+    /// by MOVING them (not copying) — the caller needs the original store
+    /// location to be free of the corrupted file so a fresh container can be
+    /// created at the exact same configuration/URL.
     @discardableResult
     static func backupCorruptedStore(
         storeURL: URL? = nil,
@@ -95,10 +103,10 @@ struct RemminaMacApp: App {
                         try fileManager.createDirectory(at: backupDir, withIntermediateDirectories: true)
                         let fileName = URL(fileURLWithPath: filePath).lastPathComponent
                         let destURL = backupDir.appendingPathComponent(fileName)
-                        try fileManager.copyItem(at: URL(fileURLWithPath: filePath), to: destURL)
+                        try fileManager.moveItem(at: URL(fileURLWithPath: filePath), to: destURL)
                         filesFound += 1
                     } catch {
-                        AppLogger.shared.log("Failed to copy \(filePath) to backup: \(error)", level: .error)
+                        AppLogger.shared.log("Failed to move \(filePath) to backup: \(error)", level: .error)
                     }
                 }
             }
@@ -123,11 +131,13 @@ struct RemminaMacApp: App {
                         HStack(spacing: 8) {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.yellow)
-                            Text("Recovery mode: changes are not saved")
+                            Text(appState.recoveryIsInMemoryOnly
+                                 ? "Recovery mode: running in memory — changes will not be saved"
+                                 : "Recovery mode: recovered into a fresh store")
                                 .font(.callout)
                                 .fontWeight(.medium)
                             if let backupPath = appState.recoveryBackupPath {
-                                Text("(Backup: \(backupPath))")
+                                Text("(Old store backed up: \(backupPath))")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -149,10 +159,16 @@ struct RemminaMacApp: App {
                 .alert("Recovery Mode", isPresented: $showingRecoveryAlert) {
                     Button("OK", role: .cancel) {}
                 } message: {
-                    if let backup = appState.recoveryBackupPath {
-                        Text("The database failed to load and was backed up to:\n\(backup)\n\nThe app is running in recovery mode.")
+                    if appState.recoveryIsInMemoryOnly {
+                        if let backup = appState.recoveryBackupPath {
+                            Text("The database failed to load and was backed up to:\n\(backup)\n\nA fresh store could not be created either, so the app is running in memory: changes will not be saved.")
+                        } else {
+                            Text("The database failed to load, and a fresh store could not be created. The app is running in memory: changes will not be saved.")
+                        }
+                    } else if let backup = appState.recoveryBackupPath {
+                        Text("The database failed to load. The old store was backed up to:\n\(backup)\n\nThe app has recovered into a fresh, empty store — changes now save normally.")
                     } else {
-                        Text("The database failed to load. The app is running in recovery mode.")
+                        Text("The database failed to load. The app has recovered into a fresh, empty store — changes now save normally.")
                     }
                 }
                 .onAppear {

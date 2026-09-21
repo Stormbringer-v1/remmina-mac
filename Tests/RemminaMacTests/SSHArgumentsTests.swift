@@ -83,4 +83,67 @@ struct SSHArgumentsTests {
         let session = SSHSession(profile: profile, password: nil)
         #expect(session.effectiveKeyPath == keyFile.path)
     }
+
+    // MARK: - Key validation must not silently degrade to the agent
+
+    @Test("connect() surfaces .error and never spawns when the configured SSH key is invalid")
+    func testConnectFailsFastOnInvalidKey() {
+        let profile = ConnectionProfile(
+            name: "InvalidKeyTest",
+            protocolType: .ssh,
+            host: "192.0.2.1",
+            port: 22,
+            username: "testuser",
+            sshKeyPath: "/nonexistent/path/id_rsa_\(UUID().uuidString)"
+        )
+
+        let session = SSHSession(profile: profile, password: nil)
+        session.connect()
+
+        // Assigned synchronously on the caller's thread by connect() itself
+        // (this path never dispatches to main), so no polling is needed.
+        var isError = false
+        if case .error = session.status { isError = true }
+        #expect(isError, "expected .error, got \(session.status.displayName)")
+        #expect(session.isProcessAlive == false, "connect() must return before spawning ssh")
+    }
+
+    // MARK: - diagnose(): exit-code + recent-output classification (ISSUE-005 follow-up)
+
+    @Test("diagnose() maps known ssh failure phrases to specific messages, always including the exit code")
+    func testDiagnoseMapsKnownPhrases() {
+        let cases: [(output: String, expectedFragment: String)] = [
+            ("Permission denied (publickey).", "authentication failed"),
+            ("Host key verification failed.", "host key problem"),
+            ("@@@@@@@@@@@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@@@@@@@@@@@", "host key problem"),
+            ("ssh: Could not resolve hostname foo.invalid: nodename nor servname provided, or not known", "dns lookup failed"),
+            ("ssh: connect to host 10.0.0.1 port 22: Connection refused", "nothing is listening"),
+            ("ssh: connect to host 10.0.0.1 port 22: Connection timed out", "network timeout"),
+            ("ssh: connect to host 10.0.0.1 port 22: Operation timed out", "network timeout"),
+            ("ssh: connect to host 10.0.0.1 port 22: No route to host", "network unreachable"),
+            ("connect: Network is unreachable", "network unreachable"),
+        ]
+
+        for testCase in cases {
+            let message = SSHSession.diagnose(exitCode: 255, recentOutput: testCase.output, wasConnecting: true)
+            #expect(message.contains("255"), "message must include the exit code: \(message)")
+            #expect(message.lowercased().contains(testCase.expectedFragment), "expected '\(testCase.expectedFragment)' in: \(message)")
+        }
+    }
+
+    @Test("diagnose() falls back to the existing generic messages, unchanged, when nothing matches")
+    func testDiagnoseFallback() {
+        let whileConnecting = SSHSession.diagnose(exitCode: 1, recentOutput: "some unrelated banner text", wasConnecting: true)
+        #expect(whileConnecting == "SSH exited with code 1 before authenticating — verify credentials, host, and network")
+
+        let afterConnecting = SSHSession.diagnose(exitCode: 1, recentOutput: "some unrelated banner text", wasConnecting: false)
+        #expect(afterConnecting == "SSH session ended (exit code 1)")
+    }
+
+    @Test("diagnose() never echoes the raw output buffer into the returned message")
+    func testDiagnoseNeverLeaksRawOutput() {
+        let suspiciousOutput = "some-very-specific-debug-token-should-not-leak Permission denied (publickey)."
+        let message = SSHSession.diagnose(exitCode: 255, recentOutput: suspiciousOutput, wasConnecting: true)
+        #expect(!message.contains("some-very-specific-debug-token-should-not-leak"))
+    }
 }

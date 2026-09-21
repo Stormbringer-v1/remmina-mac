@@ -88,6 +88,33 @@ final class KeychainStore {
         return String(data: data, encoding: .utf8)
     }
 
+    /// Returns whether a password is stored for a given profile ID, without
+    /// reading its value: `kSecReturnAttributes` (not `kSecReturnData`), so
+    /// no secret bytes are read out of the Keychain.
+    func hasPassword(for profileId: UUID) throws -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: profileId.uuidString,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        if status == errSecItemNotFound {
+            return false
+        }
+
+        guard status == errSecSuccess else {
+            AppLogger.shared.log("Keychain existence check failed with status: \(status)", level: .error)
+            throw KeychainError.unexpectedStatus(status)
+        }
+
+        return true
+    }
+
     /// Deletes the password for a given profile ID.
     @discardableResult
     func deletePassword(for profileId: UUID) -> Bool {
@@ -138,6 +165,13 @@ extension KeychainStore: CredentialStore {
         switch kind {
         case .password:
             return try password(for: profileId)
+        }
+    }
+
+    func hasSecret(_ kind: SecretKind, for profileId: UUID) throws -> Bool {
+        switch kind {
+        case .password:
+            return try hasPassword(for: profileId)
         }
     }
 
