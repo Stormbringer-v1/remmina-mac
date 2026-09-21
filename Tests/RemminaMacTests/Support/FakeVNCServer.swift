@@ -167,7 +167,9 @@ final class FakeVNCServer: @unchecked Sendable {
 
     /// Block until the client connects or `timeout` elapses. Returns true
     /// if connected.
-    func waitForClient(timeout: TimeInterval = 5.0) -> Bool {
+    /// `timeout` defaults scale with `ciDeadlineScale`: on a loaded CI
+    /// runner the client's connect can take several seconds.
+    func waitForClient(timeout: TimeInterval = 5.0 * ciDeadlineScale) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if clientFD >= 0 { return true }
@@ -322,7 +324,7 @@ final class FakeVNCServer: @unchecked Sendable {
 
     /// Block until `count` bytes have been received from the client, or
     /// `timeout` elapses. Returns the bytes actually received.
-    func receive(count: Int, timeout: TimeInterval = 2.0) -> Data? {
+    func receive(count: Int, timeout: TimeInterval = 2.0 * ciDeadlineScale) -> Data? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             receivedBufferLock.lock()
