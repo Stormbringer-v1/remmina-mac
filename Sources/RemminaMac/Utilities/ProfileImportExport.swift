@@ -42,6 +42,7 @@ struct ProfileImportExport {
     // MARK: - Data Transfer Object
 
     struct ProfileDTO: Codable {
+        let id: String?
         let name: String
         let protocolType: String
         let host: String
@@ -53,10 +54,10 @@ struct ProfileImportExport {
         let isFavorite: Bool
         let connectOnOpen: Bool
         let sshKeyPath: String?
-        
+
         // Strict decoding - reject unknown fields
         enum CodingKeys: String, CodingKey, CaseIterable {
-            case name, protocolType, host, port, username, domain
+            case id, name, protocolType, host, port, username, domain
             case notes, tags, isFavorite, connectOnOpen, sshKeyPath
         }
 
@@ -91,6 +92,11 @@ struct ProfileImportExport {
                 }
             }
 
+            // Optional so exports made before this field existed still
+            // import; missing (or explicitly null) means "generate a fresh
+            // UUID" (see toProfile(at:)). A present-but-malformed id is
+            // caught there too, alongside the file's other field validation.
+            self.id = try container.decodeIfPresent(String.self, forKey: .id)
             self.name = try container.decode(String.self, forKey: .name)
             self.protocolType = try container.decode(String.self, forKey: .protocolType)
             self.host = try container.decode(String.self, forKey: .host)
@@ -105,6 +111,7 @@ struct ProfileImportExport {
         }
 
         init(from profile: ConnectionProfile) {
+            self.id = profile.id.uuidString
             self.name = profile.name
             self.protocolType = profile.protocolRawValue
             self.host = profile.host
@@ -120,6 +127,22 @@ struct ProfileImportExport {
         
         /// Validate and convert to ConnectionProfile
         func toProfile(at index: Int) throws -> ConnectionProfile {
+            // Resolve id: missing means a legacy export (or one without an
+            // id at all) and gets a fresh UUID, same as before this field
+            // existed. A present id must be a well-formed UUID string; a
+            // malformed one is rejected here like any other invalid field
+            // rather than silently replaced, so a corrupted export doesn't
+            // masquerade as a clean import.
+            let profileId: UUID
+            if let id {
+                guard let parsed = UUID(uuidString: id) else {
+                    throw ImportError.invalidProfileData(index: index, reason: "Invalid id '\(id)'")
+                }
+                profileId = parsed
+            } else {
+                profileId = UUID()
+            }
+
             // Validate name
             guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw ImportError.invalidProfileData(index: index, reason: "Name cannot be empty")
@@ -172,6 +195,7 @@ struct ProfileImportExport {
             
             let proto = ProtocolType(rawValue: protocolType) ?? .ssh
             return ConnectionProfile(
+                id: profileId,
                 name: name,
                 protocolType: proto,
                 host: trimmedHost,

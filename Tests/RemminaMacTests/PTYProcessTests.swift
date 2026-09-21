@@ -257,7 +257,12 @@ struct PTYProcessTests {
         pty.write(largeData)
         let elapsed = CFAbsoluteTimeGetCurrent() - start
 
-        #expect(elapsed < 0.050, "pty.write(256 KiB) must return in under 50ms; took \(elapsed)s")
+        // Hang guard, not a performance assertion: pty.write() dispatches to
+        // ioQueue.async and returns immediately by design (ISSUE-011), so
+        // this call should never approach this bound. It exists to catch a
+        // regression into a synchronous/blocking write, scaled for CI like
+        // the other process-spawning suites (see TestDeadlines).
+        #expect(elapsed < 2.0 * ciDeadlineScale, "pty.write(256 KiB) must return promptly (non-blocking); took \(elapsed)s")
 
         pty.terminate()
         _ = sem.wait(timeout: guardDeadline(2))

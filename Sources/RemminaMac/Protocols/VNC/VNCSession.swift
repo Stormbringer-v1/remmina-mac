@@ -490,6 +490,13 @@ final class VNCSession: SessionProtocol {
         if setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size)) != 0 {
             AppLogger.shared.log("VNC: setsockopt(SO_RCVTIMEO) failed: \(String(cString: strerror(errno)))", level: .warning)
         }
+        // Ask the OS to probe a genuinely dead peer (unplugged cable,
+        // slept/crashed host) even while the RFB protocol itself stays
+        // quiet between framebuffer updates.
+        var keepAlive: Int32 = 1
+        if setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, socklen_t(MemoryLayout<Int32>.size)) != 0 {
+            AppLogger.shared.log("VNC: setsockopt(SO_KEEPALIVE) failed: \(String(cString: strerror(errno)))", level: .warning)
+        }
 
         // Make the connect interruptible and bounded: switch to
         // non-blocking before calling connect() so we can poll for
@@ -737,16 +744,45 @@ final class VNCSession: SessionProtocol {
 
     // MARK: - Message Loop
 
+    /// Read-thread-only: true once `messageLoop` has sent a liveness
+    /// probe after an idle read timeout and is waiting to see whether
+    /// the server is still there. Cleared by any subsequently read
+    /// byte, not just a reply to the probe itself. Reset at the top of
+    /// `messageLoop` so a `reconnect()` that reuses this instance never
+    /// inherits state left over from a previous connection.
+    private var probeOutstanding = false
+
     private func messageLoop() {
+        probeOutstanding = false
         while runningLock.withLock({ $0 }) {
             let msgType: UInt8
-            let firstByte: UInt8?
             do {
-                firstByte = try readExact(count: 1).first
+                guard let byte = try readMessageType() else {
+                    // The read timed out with nothing received at all —
+                    // not the same as a timeout partway through a
+                    // message, which readExact still treats as fatal.
+                    // An idle desktop legitimately sends nothing while
+                    // the screen is static, so the first such timeout is
+                    // a reason to check in, not to fail: ask for a
+                    // single pixel and keep reading. Only a second
+                    // consecutive timeout — the probe itself going
+                    // unanswered — means the peer is actually gone.
+                    if probeOutstanding {
+                        fail(VNCError.readTimedOut(readTimeoutSeconds * 2).localizedDescription)
+                        return
+                    }
+                    probeOutstanding = true
+                    writeQueue.async { [weak self] in
+                        self?.sendProbeFramebufferUpdateRequest()
+                    }
+                    continue
+                }
+                probeOutstanding = false
+                msgType = byte
             } catch {
-                // readExact only throws VNCError, but Swift's exhaustive
-                // catch needs us to handle the whole Error protocol.
-                // Dispatch on the underlying type.
+                // readMessageType only throws VNCError, but Swift's
+                // exhaustive catch needs us to handle the whole Error
+                // protocol. Dispatch on the underlying type.
                 if let vncErr = error as? VNCError {
                     switch vncErr {
                     case .streamClosed:
@@ -771,12 +807,6 @@ final class VNCSession: SessionProtocol {
                 }
                 return
             }
-            guard let first = firstByte else {
-                // Clean EOF before the running flag was cleared.
-                AppLogger.shared.log("VNC: Connection closed by server")
-                return
-            }
-            msgType = first
 
             do {
                 switch msgType {
@@ -968,15 +998,23 @@ final class VNCSession: SessionProtocol {
         writeData(msg)
     }
 
-    private func sendFramebufferUpdateRequest(incremental: Bool) {
+    private func sendFramebufferUpdateRequest(incremental: Bool, width: UInt16? = nil, height: UInt16? = nil) {
         var msg = Data()
         msg.append(3) // FramebufferUpdateRequest
         msg.append(incremental ? 1 : 0)
         msg.append(contentsOf: UInt16(0).bigEndianBytes)
         msg.append(contentsOf: UInt16(0).bigEndianBytes)
-        msg.append(contentsOf: UInt16(rfbWidth).bigEndianBytes)
-        msg.append(contentsOf: UInt16(rfbHeight).bigEndianBytes)
+        msg.append(contentsOf: (width ?? UInt16(rfbWidth)).bigEndianBytes)
+        msg.append(contentsOf: (height ?? UInt16(rfbHeight)).bigEndianBytes)
         writeData(msg)
+    }
+
+    /// A minimal liveness probe for the message loop's idle-read
+    /// timeout: a non-incremental request for a single pixel. Any reply
+    /// at all — even an empty FramebufferUpdate — proves the connection
+    /// is still alive without asking the server to redraw anything.
+    private func sendProbeFramebufferUpdateRequest() {
+        sendFramebufferUpdateRequest(incremental: false, width: 1, height: 1)
     }
 
     // MARK: - Framebuffer Rendering
@@ -1054,6 +1092,42 @@ final class VNCSession: SessionProtocol {
         }
 
         return buffer
+    }
+
+    /// Read exactly the next message-type byte for `messageLoop`, but
+    /// treat an idle read timeout with nothing received as a distinct,
+    /// non-fatal outcome (`nil`) instead of throwing. Used only by
+    /// `messageLoop` — every other caller keeps using `readExact`, whose
+    /// contract (a timeout is always fatal) is unchanged.
+    private func readMessageType() throws -> UInt8? {
+        let fd = socketFD
+        guard fd >= 0 else { throw VNCError.streamClosed }
+
+        while true {
+            if cancelledLock.withLock({ $0 }) {
+                throw VNCError.streamClosed
+            }
+
+            var byte: UInt8 = 0
+            let bytesRead = withUnsafeMutablePointer(to: &byte) { ptr -> Int in
+                Darwin.read(fd, ptr, 1)
+            }
+
+            if bytesRead == 1 { return byte }
+            if bytesRead == 0 { throw VNCError.streamClosed }
+
+            if errno == EINTR { continue }
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                // SO_RCVTIMEO fired with nothing read yet. Unlike
+                // readExact, this isn't fatal here — messageLoop turns
+                // it into a liveness probe.
+                return nil
+            }
+            if errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN {
+                throw VNCError.streamClosed
+            }
+            throw VNCError.protocolError("Read failed: \(String(cString: strerror(errno)))")
+        }
     }
 
     private func readUInt16() throws -> UInt16 {

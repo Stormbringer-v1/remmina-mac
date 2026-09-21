@@ -26,7 +26,18 @@ struct SessionTabView: View {
                     ForEach(connectionManager.sessions, id: \.id) { session in
                         let isActive = session.id == connectionManager.activeSessionId
                         SessionContainerView(isActive: isActive) {
+                            // SessionContainerView hosts this content in its own
+                            // NSHostingView. Newer SwiftUI releases propagate the
+                            // ambient environment into a hosting view created
+                            // during a representable's update (verified on
+                            // macOS 27), but older releases treated it as a fresh
+                            // environment root, and RDPSessionView reads
+                            // `@Environment(ConnectionManager.self)` non-optionally.
+                            // Re-injecting the manager is explicit and harmless
+                            // either way, so the hosted subtree never depends on
+                            // that propagation.
                             sessionContent(for: session)
+                                .environment(connectionManager)
                         }
                         .opacity(isActive ? 1 : 0)
                         .allowsHitTesting(isActive)
@@ -143,7 +154,7 @@ struct SessionTabView: View {
                 Label("Reconnect", systemImage: "arrow.clockwise")
             }
             .buttonStyle(.borderless)
-            .disabled(!status.isActive && status != .disconnected)
+            .disabled(status == .connecting)
 
             Button(action: {
                 connectionManager.closeSession(session)

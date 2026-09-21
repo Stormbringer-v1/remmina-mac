@@ -7,6 +7,16 @@ import Foundation
 struct PasswordPromptDetector {
     private static let maxPromptBufferBytes = 4096
 
+    /// The kind of end-anchored prompt `classify` found, if any.
+    enum PromptKind: Equatable {
+        /// An account/login password prompt (`Password:`, `user@host's password:`, …).
+        case password
+        /// A key passphrase prompt (`Enter passphrase for key '...':`). No
+        /// passphrase support exists yet, so callers treat this as fatal
+        /// rather than something to answer.
+        case passphrase
+    }
+
     /// Rolling buffer of recent output data.
     private(set) var window = Data()
 
@@ -23,21 +33,23 @@ struct PasswordPromptDetector {
         window.removeAll(keepingCapacity: false)
     }
 
-    /// Pure function matching: checks if `window` ends with a valid password prompt.
+    /// Pure function classifying the trailing line of `window` as a password
+    /// prompt, a passphrase prompt, or neither.
     ///
-    /// Requirements:
+    /// Requirements (both kinds):
     /// - Examine only the bytes after the last `\n` or `\r`
-    /// - If content ends with a newline, returns false
-    /// - Trim trailing whitespace
-    /// - Lowercase
-    /// - Match `hasSuffix("password:")` or regex `password( for [^\n:]+)?:$`
-    /// - Return false for passphrase prompts like "Enter passphrase for key..."
-    static func matches(window: Data) -> Bool {
-        guard !window.isEmpty else { return false }
+    /// - If content ends with a newline, there is no prompt
+    /// - Trim trailing whitespace, lowercase
+    ///
+    /// Password: `hasSuffix("password:")` or regex `password( for [^\n:]+)?:$`.
+    /// Passphrase: the trailing line contains "passphrase" and ends with
+    /// ":" (e.g. "Enter passphrase for key '/Users/x/.ssh/id_ed25519':").
+    static func classify(window: Data) -> PromptKind? {
+        guard !window.isEmpty else { return nil }
 
         // Must not end with newline
         guard let lastByte = window.last, lastByte != 0x0A && lastByte != 0x0D else {
-            return false
+            return nil
         }
 
         // Find index of last \n or \r
@@ -52,37 +64,52 @@ struct PasswordPromptDetector {
 
         let trailingSlice = window[startIndex...]
         guard let text = String(data: trailingSlice, encoding: .utf8) else {
-            return false
+            return nil
         }
 
         let trimmed = text.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return false }
+        guard !trimmed.isEmpty else { return nil }
 
         let lower = trimmed.lowercased()
 
-        // Explicitly reject passphrase prompts
+        // A passphrase prompt is end-anchored the same way a password
+        // prompt is: a trailing line mentioning "passphrase" that ends
+        // with ":".
         if lower.contains("passphrase") {
-            return false
+            return lower.hasSuffix(":") ? .passphrase : nil
         }
 
         // Match suffix "password:" or regex "password( for [^\n:]+)?:$"
         if lower.hasSuffix("password:") {
-            return true
+            return .password
         }
 
         // Check regex: password( for [^\n:]+)?:$
         if let regex = try? NSRegularExpression(pattern: #"password( for [^\n:]+)?:$"#, options: [.caseInsensitive]) {
             let range = NSRange(lower.startIndex..<lower.endIndex, in: lower)
             if regex.firstMatch(in: lower, options: [], range: range) != nil {
-                return true
+                return .password
             }
         }
 
-        return false
+        return nil
+    }
+
+    /// Pure function matching: checks if `window` ends with a valid password
+    /// prompt. Exactly equivalent to `classify(window:) == .password`; kept
+    /// so RDPSession (which only ever cares about password prompts) is
+    /// unaffected by passphrase classification.
+    static func matches(window: Data) -> Bool {
+        classify(window: window) == .password
     }
 
     /// Checks if the internal rolling window currently matches a password prompt.
     func matches() -> Bool {
         Self.matches(window: window)
+    }
+
+    /// Classifies the internal rolling window (see `classify(window:)`).
+    func classify() -> PromptKind? {
+        Self.classify(window: window)
     }
 }

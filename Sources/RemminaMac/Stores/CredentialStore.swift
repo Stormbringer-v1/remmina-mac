@@ -41,12 +41,31 @@ protocol CredentialStore: AnyObject, Sendable {
     /// Removes every secret this store holds for a profile (used on profile deletion).
     func deleteAll(for profileId: UUID) throws
 
+    /// Returns whether a secret is currently stored for `profileId`, without
+    /// reading its value. The default implementation (in the extension
+    /// below) simply calls `secret(_:for:)` and discards the value;
+    /// `KeychainStore` overrides it with an attributes-only query so merely
+    /// checking existence never reads secret bytes out of the Keychain (and
+    /// never risks the ACL prompt that reading the value can trigger).
+    func hasSecret(_ kind: SecretKind, for profileId: UUID) throws -> Bool
+
     /// False when the backend intentionally persists nothing, so the UI can
     /// say so instead of pretending a typed password was saved.
     var persists: Bool { get }
 
     /// Short human-readable name for Settings, e.g. "None", "macOS Keychain".
     var displayName: String { get }
+}
+
+extension CredentialStore {
+    /// Default existence check: read the secret and discard the value.
+    /// Correct for every conformer (including `NullCredentialStore` and test
+    /// doubles that never override it), just not the cheapest possible for
+    /// backends that can check existence without reading the value —
+    /// `KeychainStore` overrides this.
+    func hasSecret(_ kind: SecretKind, for profileId: UUID) throws -> Bool {
+        try secret(kind, for: profileId) != nil
+    }
 }
 
 /// A `CredentialStore` that stores nothing. This is the shipped default:
@@ -87,6 +106,16 @@ final class ActiveCredentialStore: CredentialStore {
 
     func secret(_ kind: SecretKind, for profileId: UUID) throws -> String? {
         try resolved.secret(kind, for: profileId)
+    }
+
+    /// Forwarded explicitly (rather than left to the protocol extension's
+    /// default) so this resolves to whatever `hasSecret` the live backend
+    /// provides — `KeychainStore`'s attributes-only override in particular.
+    /// Without this override, the inherited default would call `self.secret`
+    /// (this type's own `secret`, which forwards to `resolved.secret`),
+    /// defeating the point of a cheaper existence check.
+    func hasSecret(_ kind: SecretKind, for profileId: UUID) throws -> Bool {
+        try resolved.hasSecret(kind, for: profileId)
     }
 
     func save(_ secret: String, kind: SecretKind, for profileId: UUID) throws {

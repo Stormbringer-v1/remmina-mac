@@ -47,12 +47,14 @@ struct EncryptedStorePassphraseView: View {
 
             SecureField("Passphrase", text: $passphrase)
                 .textContentType(isCreateFlow ? .newPassword : .password)
-                .onSubmit(submit)
+                .disabled(isWorking)
+                .onSubmit { submit() }
 
             if isCreateFlow {
                 SecureField("Confirm passphrase", text: $confirmPassphrase)
                     .textContentType(.newPassword)
-                    .onSubmit(submit)
+                    .disabled(isWorking)
+                    .onSubmit { submit() }
             }
 
             if let errorMessage {
@@ -62,10 +64,15 @@ struct EncryptedStorePassphraseView: View {
             }
 
             HStack {
+                if isWorking {
+                    ProgressView()
+                        .controlSize(.small)
+                }
                 Spacer()
                 Button("Cancel") {
                     onDone(false)
                 }
+                .disabled(isWorking)
                 Button(isCreateFlow ? "Create" : "Unlock") {
                     submit()
                 }
@@ -77,6 +84,14 @@ struct EncryptedStorePassphraseView: View {
         .frame(width: 380)
     }
 
+    /// `@MainActor` explicitly: a plain (non-isolated) method here would
+    /// make the isolation of the `Task { }` below — and therefore of the
+    /// state mutations after its `await` — depend on inference rules that
+    /// don't actually apply to arbitrary helper methods (only `body` itself
+    /// is `@MainActor`-isolated by the `View` protocol requirement). Marking
+    /// `submit()` itself `@MainActor` makes that isolation explicit and
+    /// compiler-checked instead of assumed.
+    @MainActor
     private func submit() {
         guard canSubmit else {
             if isCreateFlow && passphrase != confirmPassphrase {
@@ -85,19 +100,39 @@ struct EncryptedStorePassphraseView: View {
             return
         }
         isWorking = true
-        defer { isWorking = false }
-        do {
-            if isCreateFlow {
-                try store.createStore(withPassphrase: passphrase)
-            } else {
-                try store.unlock(withPassphrase: passphrase)
+        errorMessage = nil
+
+        // PBKDF2 at 600,000 iterations takes hundreds of milliseconds; run
+        // it off the main thread so `isWorking`/the progress indicator
+        // actually get to render instead of the UI freezing for the
+        // duration. `store` is Sendable (its derived key lives behind an
+        // internal lock), so it's safe to use from the detached task.
+        let enteredPassphrase = passphrase
+        let creating = isCreateFlow
+        let targetStore = store
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    if creating {
+                        try targetStore.createStore(withPassphrase: enteredPassphrase)
+                    } else {
+                        try targetStore.unlock(withPassphrase: enteredPassphrase)
+                    }
+                }.value
+                // Back on the main actor: this Task runs on the MainActor
+                // because `submit()` (its enclosing, isolation-inferring
+                // context) is `@MainActor`; only the detached child above
+                // ran off-main.
+                isWorking = false
+                onDone(true)
+            } catch EncryptedStoreError.wrongPassphrase {
+                isWorking = false
+                errorMessage = "Incorrect passphrase. Try again."
+                passphrase = ""
+            } catch {
+                isWorking = false
+                errorMessage = error.localizedDescription
             }
-            onDone(true)
-        } catch EncryptedStoreError.wrongPassphrase {
-            errorMessage = "Incorrect passphrase. Try again."
-            passphrase = ""
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 }

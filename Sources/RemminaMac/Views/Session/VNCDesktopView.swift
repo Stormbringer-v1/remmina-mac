@@ -19,7 +19,7 @@ struct VNCDesktopView: NSViewRepresentable {
     }
 
     func updateNSView(_ canvas: VNCCanvasView, context: Context) {
-        canvas.fitToWindow = fitToWindow
+        canvas.setFitToWindow(fitToWindow)
         if let image = currentImage {
             canvas.updateImage(image, dirtyRect: dirtyRect)
         }
@@ -34,7 +34,10 @@ extension VNCCanvasView: SessionFocusable {}
 /// NSView that renders the VNC framebuffer and handles mouse/keyboard input.
 final class VNCCanvasView: NSView {
     var session: VNCSession?
-    var fitToWindow = true
+    // `makeNSView` assigns this directly for the initial value; after that,
+    // changes must go through `setFitToWindow(_:)` so a toggle triggers a
+    // full repaint (see `setFitToWindow`).
+    fileprivate(set) var fitToWindow = true
     private var framebufferImage: NSImage?
     private var imageRect: NSRect = .zero
     private var trackingArea: NSTrackingArea?
@@ -49,13 +52,27 @@ final class VNCCanvasView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        window?.makeFirstResponder(self)
+        // Focus is owned solely by SessionContainerView.updateActive, which
+        // finds the active tab's SessionFocusable view and makes it first
+        // responder. Every session view stays alive (hidden) in the
+        // ZStack, so grabbing first responder here would steal keyboard
+        // focus from the active tab whenever a second VNC tab is opened.
         updateTrackingArea()
     }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         updateTrackingArea()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let oldSize = frame.size
+        super.setFrameSize(newSize)
+        guard newSize != oldSize else { return }
+        // A resize invalidates the fit-to-window scale/centering, and no
+        // new framebuffer update will arrive on its own to trigger a
+        // redraw — repaint the whole canvas at the new size immediately.
+        needsDisplay = true
     }
 
     private func updateTrackingArea() {
@@ -72,11 +89,33 @@ final class VNCCanvasView: NSView {
         trackingArea = area
     }
 
+    /// Update the fit-to-window mode. SwiftUI's `updateNSView` calls this
+    /// on every body re-evaluation, not just when the toggle actually
+    /// flips, so only the transition needs a repaint — reassigning the
+    /// same value should stay a no-op.
+    func setFitToWindow(_ newValue: Bool) {
+        guard newValue != fitToWindow else { return }
+        fitToWindow = newValue
+        // The scale/centering used by `draw(_:)` depends on `fitToWindow`,
+        // so the whole canvas is stale, not just the last dirty region.
+        needsDisplay = true
+    }
+
     /// Receive a new framebuffer snapshot. We ask AppKit to repaint only
     /// the dirty region (ISSUE-024) rather than the full canvas, which
     /// keeps incremental updates cheap.
+    ///
+    /// SwiftUI re-invokes `updateNSView` (and thus this call) whenever the
+    /// enclosing view re-renders for any reason, including a
+    /// `fitToWindow` toggle that brought no new framebuffer with it. In
+    /// that case `image` is the same instance already on screen and
+    /// `dirtyRect` is left over from the last real server update, so
+    /// trusting it here would repaint only that stale sliver. Only act on
+    /// `dirtyRect` when the image itself changed.
     func updateImage(_ image: NSImage, dirtyRect: NSRect) {
+        let isNewImage = image !== framebufferImage
         framebufferImage = image
+        guard isNewImage else { return }
         guard !dirtyRect.isEmpty, !dirtyRect.isNull else {
             needsDisplay = true
             return
@@ -144,8 +183,15 @@ final class VNCCanvasView: NSView {
 
         guard relX >= 0, relX <= 1, relY >= 0, relY <= 1 else { return nil }
 
-        let fbX = UInt16(relX * CGFloat(session.framebufferWidth))
-        let fbY = UInt16(relY * CGFloat(session.framebufferHeight))
+        let fbWidth = session.framebufferWidth
+        let fbHeight = session.framebufferHeight
+        guard fbWidth > 0, fbHeight > 0 else { return nil }
+
+        // relX/relY can reach exactly 1.0 at the far edge, which would
+        // otherwise yield fbX == fbWidth / fbY == fbHeight — one pixel
+        // past the valid framebuffer range.
+        let fbX = min(UInt16(relX * CGFloat(fbWidth)), UInt16(fbWidth - 1))
+        let fbY = min(UInt16(relY * CGFloat(fbHeight)), UInt16(fbHeight - 1))
         return (fbX, fbY)
     }
 

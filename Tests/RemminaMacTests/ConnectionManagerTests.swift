@@ -6,20 +6,41 @@ import Foundation
 @MainActor
 struct ConnectionManagerTests {
 
-    private func makeManager(createdSessions: UnsafeMutablePointer<[FakeSession]>? = nil) -> ConnectionManager {
+    /// Thread-safe box for collecting sessions created by a test's
+    /// `sessionFactory` closure. Replaces `withUnsafeMutablePointer(to:)`,
+    /// which handed a pointer into a local `var` to a closure retained (and
+    /// invoked later) by `ConnectionManager` — the pointer's validity ends
+    /// with the `withUnsafeMutablePointer` call, so writing through it after
+    /// that point was undefined behavior.
+    private final class CreatedSessions: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [FakeSession] = []
+
+        func append(_ session: FakeSession) {
+            lock.lock()
+            storage.append(session)
+            lock.unlock()
+        }
+
+        var all: [FakeSession] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+    }
+
+    private func makeManager(createdSessions: CreatedSessions? = nil) -> ConnectionManager {
         ConnectionManager(sessionFactory: { profile, password in
             let session = FakeSession(profile: profile, password: password, initialStatus: .connected)
-            createdSessions?.pointee.append(session)
+            createdSessions?.append(session)
             return session
         })
     }
 
     @Test("Prevent duplicate active sessions for same profile with FakeSession")
     func testDuplicateSessionPrevention() throws {
-        var created: [FakeSession] = []
-        let manager = withUnsafeMutablePointer(to: &created) { ptr in
-            makeManager(createdSessions: ptr)
-        }
+        let created = CreatedSessions()
+        let manager = makeManager(createdSessions: created)
 
         let profile = ConnectionProfile(name: "DupTest", protocolType: .ssh, host: "192.0.2.1", port: 22)
 
@@ -28,8 +49,8 @@ struct ConnectionManagerTests {
         #expect(openedFirst == .opened)
         #expect(manager.sessions.count == 1)
         #expect(manager.activeSessionId != nil)
-        #expect(created.count == 1)
-        #expect(created[0].connectCalls == 1)
+        #expect(created.all.count == 1)
+        #expect(created.all[0].connectCalls == 1)
 
         // Attempt to open duplicate
         let openedSecond = manager.openSession(for: profile)
@@ -37,7 +58,7 @@ struct ConnectionManagerTests {
         // Should return .duplicate and not create a new session
         #expect(openedSecond == .duplicate)
         #expect(manager.sessions.count == 1)
-        #expect(created.count == 1)
+        #expect(created.all.count == 1)
 
         // Should have updated activeSessionId to the existing session
         let existingSessionId = manager.sessions.first?.id
@@ -46,10 +67,8 @@ struct ConnectionManagerTests {
 
     @Test("Enforce maximum concurrent session limit without spawning child processes")
     func testMaxSessionLimit() throws {
-        var created: [FakeSession] = []
-        let manager = withUnsafeMutablePointer(to: &created) { ptr in
-            makeManager(createdSessions: ptr)
-        }
+        let created = CreatedSessions()
+        let manager = makeManager(createdSessions: created)
 
         let max = ConnectionManager.maxSessions
 
@@ -61,7 +80,7 @@ struct ConnectionManagerTests {
         }
 
         #expect(manager.sessions.count == max)
-        #expect(created.count == max)
+        #expect(created.all.count == max)
 
         // Attempt to open one more
         let excessProfile = ConnectionProfile(name: "Excess", protocolType: .ssh, host: "192.0.2.255", port: 22)
@@ -70,7 +89,7 @@ struct ConnectionManagerTests {
         // Should be rejected
         #expect(openedExcess == .limitReached)
         #expect(manager.sessions.count == max)
-        #expect(created.count == max)
+        #expect(created.all.count == max)
     }
 
     @Test("Allow new session for profile if previous session is closed")
@@ -96,16 +115,14 @@ struct ConnectionManagerTests {
 
     @Test("Late status callback does not re-insert closed session into sessionStatuses (ISSUE-015)")
     func testLateStatusCallbackDoesNotReinsertSession() async throws {
-        var created: [FakeSession] = []
-        let manager = withUnsafeMutablePointer(to: &created) { ptr in
-            makeManager(createdSessions: ptr)
-        }
+        let created = CreatedSessions()
+        let manager = makeManager(createdSessions: created)
 
         let profile = ConnectionProfile(name: "LateStatusTest", protocolType: .ssh, host: "192.0.2.1", port: 22)
         let opened = manager.openSession(for: profile)
         #expect(opened == .opened)
 
-        let fake = created.first!
+        let fake = created.all.first!
         let sessionId = fake.id
         #expect(manager.sessionStatuses[sessionId] != nil)
 
@@ -143,10 +160,8 @@ struct ConnectionManagerTests {
 
     @Test("openSession rejects an invalid host without opening a session (ISSUE-016: OpenResult.hostInvalid)")
     func testOpenSessionHostInvalid() throws {
-        var created: [FakeSession] = []
-        let manager = withUnsafeMutablePointer(to: &created) { ptr in
-            makeManager(createdSessions: ptr)
-        }
+        let created = CreatedSessions()
+        let manager = makeManager(createdSessions: created)
 
         // ConnectionProfile's own initializer does not re-validate the host,
         // so this bypasses UI validation the way a mutated/imported profile
@@ -160,7 +175,7 @@ struct ConnectionManagerTests {
         }
         #expect(!reason.isEmpty)
         #expect(manager.sessions.isEmpty)
-        #expect(created.isEmpty)
+        #expect(created.all.isEmpty)
     }
 
     @Test("ConnectionManager.defaultFactory threads SecuritySettings.rdpIgnoreCertificate into RDPSession (regression fix)")
@@ -211,7 +226,7 @@ struct ConnectionManagerTests {
             .urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs/RemminaMac/RemminaMac.log")
         var sawCertIgnoreWarning = false
-        let deadline = Date().addingTimeInterval(8.0)
+        let deadline = Date().addingTimeInterval(8.0 * ciDeadlineScale)
         while Date() < deadline {
             if let contents = try? String(contentsOf: logFileURL, encoding: .utf8),
                contents.contains("/cert:ignore") {
@@ -225,10 +240,8 @@ struct ConnectionManagerTests {
 
     @Test("closeAll cleans up all sessions and nils delegates")
     func testCloseAllCleansUp() {
-        var created: [FakeSession] = []
-        let manager = withUnsafeMutablePointer(to: &created) { ptr in
-            makeManager(createdSessions: ptr)
-        }
+        let created = CreatedSessions()
+        let manager = makeManager(createdSessions: created)
 
         for i in 1...3 {
             let profile = ConnectionProfile(name: "CloseAll \(i)", protocolType: .ssh, host: "192.0.2.\(i)", port: 22)
@@ -243,7 +256,7 @@ struct ConnectionManagerTests {
         #expect(manager.sessions.isEmpty)
         #expect(manager.sessionStatuses.isEmpty)
         #expect(manager.activeSessionId == nil)
-        for s in created {
+        for s in created.all {
             #expect(s.delegate == nil)
             #expect(s.disconnectCalls == 1)
         }

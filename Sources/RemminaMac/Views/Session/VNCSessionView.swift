@@ -73,7 +73,10 @@ struct VNCSessionView: View {
             .padding(.vertical, 6)
             .background(.bar)
         }
-        .onAppear {
+        .onAppear { [session] in
+            // Capture `session` explicitly so the nested `[weak session]`
+            // below refers to this local rather than an implicit strong
+            // capture of the view's property (a Swift 6.4 diagnostic).
             session.onFramebufferUpdate = { [weak session] image, rect in
                 currentImage = image
                 dirtyRect = rect

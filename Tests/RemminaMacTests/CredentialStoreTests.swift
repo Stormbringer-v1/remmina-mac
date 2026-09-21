@@ -49,15 +49,38 @@ struct CredentialStoreTests {
 
     // MARK: - ConnectionManager + injected CredentialStore
 
+    /// Thread-safe box for collecting sessions created by a test's
+    /// `sessionFactory` closure. Replaces `withUnsafeMutablePointer(to:)`,
+    /// which handed a pointer into a local `var` to a closure retained (and
+    /// invoked later) by `ConnectionManager` — the pointer's validity ends
+    /// with the `withUnsafeMutablePointer` call, so writing through it after
+    /// that point was undefined behavior.
+    private final class CreatedSessions: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [FakeSession] = []
+
+        func append(_ session: FakeSession) {
+            lock.lock()
+            storage.append(session)
+            lock.unlock()
+        }
+
+        var all: [FakeSession] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+    }
+
     @MainActor
     private func makeConnectionManager(
         credentialStore: CredentialStore,
-        createdSessions: UnsafeMutablePointer<[FakeSession]>? = nil
+        createdSessions: CreatedSessions? = nil
     ) -> ConnectionManager {
         ConnectionManager(
             sessionFactory: { profile, password in
                 let session = FakeSession(profile: profile, password: password, initialStatus: .connected)
-                createdSessions?.pointee.append(session)
+                createdSessions?.append(session)
                 return session
             },
             credentialStore: credentialStore
@@ -68,16 +91,14 @@ struct CredentialStoreTests {
     @MainActor
     func testSSHOpensWithNoStoredSecret() throws {
         let fakeStore = FakeCredentialStore(persists: true)
-        var created: [FakeSession] = []
-        let manager = withUnsafeMutablePointer(to: &created) { ptr in
-            makeConnectionManager(credentialStore: fakeStore, createdSessions: ptr)
-        }
+        let created = CreatedSessions()
+        let manager = makeConnectionManager(credentialStore: fakeStore, createdSessions: created)
 
         let profile = ConnectionProfile(name: "NoSecretSSH", protocolType: .ssh, host: "192.0.2.1", port: 22)
         let result = manager.openSession(for: profile)
 
         #expect(result == .opened)
-        #expect(created.count == 1)
+        #expect(created.all.count == 1)
         if case .keychainFailed = result {
             Issue.record("SSH with no stored secret must not report .keychainFailed")
         }
@@ -89,16 +110,14 @@ struct CredentialStoreTests {
         let fakeStore = FakeCredentialStore(persists: true)
         fakeStore.throwOnSecret = KeychainError.unexpectedStatus(errSecAuthFailed)
 
-        var created: [FakeSession] = []
-        let manager = withUnsafeMutablePointer(to: &created) { ptr in
-            makeConnectionManager(credentialStore: fakeStore, createdSessions: ptr)
-        }
+        let created = CreatedSessions()
+        let manager = makeConnectionManager(credentialStore: fakeStore, createdSessions: created)
 
         let profile = ConnectionProfile(name: "ThrowingStoreSSH", protocolType: .ssh, host: "192.0.2.2", port: 22)
         let result = manager.openSession(for: profile)
 
         #expect(result == .keychainFailed(errSecAuthFailed))
-        #expect(created.isEmpty, "a failed credential read must abort before a session is created")
+        #expect(created.all.isEmpty, "a failed credential read must abort before a session is created")
     }
 
     @Test("openSession returns .keychainFailed(errSecIO) when the store throws a non-Keychain error")
@@ -119,10 +138,8 @@ struct CredentialStoreTests {
     @MainActor
     func testVNCWithNoSecretAndNonPersistingStoreIsCredentialUnavailable() throws {
         let fakeStore = FakeCredentialStore(persists: false)
-        var created: [FakeSession] = []
-        let manager = withUnsafeMutablePointer(to: &created) { ptr in
-            makeConnectionManager(credentialStore: fakeStore, createdSessions: ptr)
-        }
+        let created = CreatedSessions()
+        let manager = makeConnectionManager(credentialStore: fakeStore, createdSessions: created)
 
         let profile = ConnectionProfile(name: "NoSecretVNC", protocolType: .vnc, host: "192.0.2.4", port: 5900)
         let result = manager.openSession(for: profile)
@@ -132,7 +149,7 @@ struct CredentialStoreTests {
             return
         }
         #expect(!reason.isEmpty)
-        #expect(created.isEmpty, "no session/tab should be created when the credential is unavailable")
+        #expect(created.all.isEmpty, "no session/tab should be created when the credential is unavailable")
     }
 
     @Test("openSession returns .credentialUnavailable for an RDP profile when no secret is available and the store does not persist")
@@ -158,16 +175,14 @@ struct CredentialStoreTests {
         // disabled" case — VNC/RDP still get to try (and fail on their own
         // if they truly need a password), matching pre-refactor behavior.
         let fakeStore = FakeCredentialStore(persists: true)
-        var created: [FakeSession] = []
-        let manager = withUnsafeMutablePointer(to: &created) { ptr in
-            makeConnectionManager(credentialStore: fakeStore, createdSessions: ptr)
-        }
+        let created = CreatedSessions()
+        let manager = makeConnectionManager(credentialStore: fakeStore, createdSessions: created)
 
         let profile = ConnectionProfile(name: "PersistingNoSecretVNC", protocolType: .vnc, host: "192.0.2.6", port: 5900)
         let result = manager.openSession(for: profile)
 
         #expect(result == .opened)
-        #expect(created.count == 1)
+        #expect(created.all.count == 1)
     }
 
     @Test("openSession returns .storeLocked (not .keychainFailed) when the store throws EncryptedStoreError.locked, for both VNC and SSH profiles")
@@ -176,10 +191,8 @@ struct CredentialStoreTests {
         let fakeStore = FakeCredentialStore(persists: true)
         fakeStore.throwOnSecret = EncryptedStoreError.locked
 
-        var created: [FakeSession] = []
-        let manager = withUnsafeMutablePointer(to: &created) { ptr in
-            makeConnectionManager(credentialStore: fakeStore, createdSessions: ptr)
-        }
+        let created = CreatedSessions()
+        let manager = makeConnectionManager(credentialStore: fakeStore, createdSessions: created)
 
         let vncProfile = ConnectionProfile(name: "LockedVNC", protocolType: .vnc, host: "192.0.2.7", port: 5900)
         let vncResult = manager.openSession(for: vncProfile)
@@ -200,7 +213,7 @@ struct CredentialStoreTests {
             return
         }
 
-        #expect(created.isEmpty, "no session/tab should be created while the credential store is locked")
+        #expect(created.all.isEmpty, "no session/tab should be created while the credential store is locked")
     }
 
     // MARK: - KeychainStore round-trips through the CredentialStore protocol
@@ -264,31 +277,14 @@ struct CredentialStoreTests {
         #expect(retrieved == password)
     }
 
-    @Test("KeychainStore's production service name is unchanged (static source audit)")
-    func testKeychainStoreProductionServiceNameUnchanged() throws {
-        // Locate the package root by walking up from this test file
-        // (same technique as C2AuditTests' posix_spawn static audit).
-        let fm = FileManager.default
-        var searchURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        var packageRoot: URL?
-        for _ in 0..<10 {
-            searchURL = searchURL.deletingLastPathComponent()
-            if fm.fileExists(atPath: searchURL.appendingPathComponent("Package.swift").path) {
-                packageRoot = searchURL
-                break
-            }
-        }
-        guard let root = packageRoot else {
-            Issue.record("could not locate package root by walking up from \(#filePath)")
-            return
-        }
-
-        let keychainStorePath = root.appendingPathComponent("Sources/RemminaMac/Stores/KeychainStore.swift").path
-        let source = try String(contentsOf: URL(fileURLWithPath: keychainStorePath), encoding: .utf8)
-
-        #expect(source.contains(#"com.stormbringer-v1.remminamac.credentials"#),
-                "KeychainStore's default production service name must not change — previously saved passwords must remain readable when a user opts back into Keychain")
-        #expect(source.contains("kSecAttrAccount as String: profileId.uuidString"),
-                "the Keychain account must stay profileId.uuidString so previously saved passwords remain addressable")
-    }
+    // (A prior "KeychainStore's production service name is unchanged" test
+    // lived here. It grepped KeychainStore.swift's source text for the
+    // literal production service string and the `profileId.uuidString`
+    // account key — a source-text audit, not a behavioral test, and it
+    // pinned down the actual production Keychain service name (which none
+    // of the tests in this file should touch). The behavioral half of what
+    // it checked — that the CredentialStore protocol adapter uses
+    // `kSecAttrService`/`kSecAttrAccount` the same way the direct API does —
+    // is already covered, against a random per-run service, by
+    // testKeychainStoreProtocolUsesSameAccountAndServiceStrings above.)
 }

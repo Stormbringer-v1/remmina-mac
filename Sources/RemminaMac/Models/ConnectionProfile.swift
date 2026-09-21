@@ -43,7 +43,7 @@ final class ConnectionProfile {
         self.username = username
         self.domain = domain
         self.notes = notes
-        self.tagsRawValue = tags.joined(separator: ",")
+        self.tagsRawValue = Self.sanitizedTagsRawValue(from: tags)
         self.isFavorite = isFavorite
         self.connectOnOpen = connectOnOpen
         self.sshKeyPath = sshKeyPath
@@ -60,11 +60,27 @@ final class ConnectionProfile {
 
     var tags: [String] {
         get {
-            tagsRawValue.isEmpty ? [] : tagsRawValue.split(separator: ",").map(String.init)
+            tagsRawValue
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
         }
         set {
-            tagsRawValue = newValue.joined(separator: ",")
+            tagsRawValue = Self.sanitizedTagsRawValue(from: newValue)
         }
+    }
+
+    /// Storage is comma-joined with no escaping, so a comma left inside a
+    /// tag's own text would be indistinguishable from the separator on the
+    /// next read (e.g. ["web,server", "prod"] would come back as 3 tags
+    /// instead of 2). Strip commas here so that can't happen, and drop
+    /// components that are empty once trimmed. Shared by `init` and the
+    /// `tags` setter so both paths write the same sanitized storage.
+    private static func sanitizedTagsRawValue(from tags: [String]) -> String {
+        tags
+            .map { $0.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: ",")
     }
 
     /// Returns the connection string in the form user@host:port

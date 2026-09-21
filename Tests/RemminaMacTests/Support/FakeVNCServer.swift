@@ -273,6 +273,17 @@ final class FakeVNCServer: @unchecked Sendable {
         send(msg)
     }
 
+    /// Send a FramebufferUpdate with zero rectangles — a minimal, valid
+    /// reply used to answer a client's liveness probe without any real
+    /// screen data.
+    func sendEmptyFramebufferUpdate() {
+        var msg = Data()
+        msg.append(0)     // message-type: FramebufferUpdate
+        msg.append(0)     // padding
+        msg.append(contentsOf: UInt16(0).bigEndianBytes)  // 0 rects
+        send(msg)
+    }
+
     /// Send raw bytes to the connected client. Returns true if every byte
     /// was written; false if the peer has closed (EPIPE/ECONNRESET) or
     /// otherwise refused the write.

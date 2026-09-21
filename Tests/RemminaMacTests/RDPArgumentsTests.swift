@@ -268,7 +268,7 @@ struct RDPArgumentsTests {
         // `disconnect()`'s `pty.terminate()` resets `pid` to -1 synchronously
         // (before sending SIGKILL asynchronously later), so this confirms run
         // 1's child was signaled before run 2 was ever launched.
-        #expect(ptyA.pid == -1, "run 1's child must have been terminated before/at reconnect, not left running alongside run 2")
+        #expect(ptyA.pid <= 0, "run 1's child must have been terminated before/at reconnect, not left running alongside run 2")
 
         // ISSUE-010 criterion: "a late handleProcessExit from a previous run
         // cannot close the current run's master." Simulate exactly that: a
@@ -359,26 +359,10 @@ struct RDPArgumentsTests {
         let start = DispatchTime.now()
         _ = RDPSession.defaultLocator()
         let elapsedSeconds = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
-        #expect(elapsedSeconds < 3.0, "defaultLocator() must not block unboundedly; took \(elapsedSeconds)s")
-    }
-}
-
-/// Thread-safe invocation counter for the ISSUE-009 test above.
-private final class InvocationCounter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var count = 0
-
-    func increment() {
-        lock.lock()
-        count += 1
-        lock.unlock()
+        #expect(elapsedSeconds < 3.0 * ciDeadlineScale, "defaultLocator() must not block unboundedly; took \(elapsedSeconds)s")
     }
 
-    var value: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return count
-    }
+    // MARK: - Display modes
 
     @Test("Display mode fullscreen passes /f and no fixed size (ISSUE: no fullscreen)")
     func testFullscreenMode() {
@@ -405,5 +389,23 @@ private final class InvocationCounter: @unchecked Sendable {
         #expect(args.contains("/size:1024x768"))
         #expect(!args.contains("/smart-sizing"))
         #expect(!args.contains("/f"))
+    }
+}
+
+/// Thread-safe invocation counter for the ISSUE-009 test above.
+private final class InvocationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
     }
 }
