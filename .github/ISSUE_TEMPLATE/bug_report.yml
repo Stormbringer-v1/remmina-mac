@@ -1,0 +1,70 @@
+name: Bug report
+description: Something in RemminaMac misbehaves
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: RemminaMac version and build
+      description: From RemminaMac → About, e.g. "0.9.1 (build 50)". If you built from source, the commit hash.
+      placeholder: 0.9.1 (build 50)
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: macOS 15.1 (24B83), Apple silicon
+    validations:
+      required: true
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Protocol involved
+      options:
+        - SSH
+        - VNC
+        - RDP
+        - Not protocol specific (profiles, settings, import/export, UI)
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Create a profile with …
+        2. Connect
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include the exact error text shown in the session tab or alert, if any.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: |
+        From `~/Library/Logs/RemminaMac/RemminaMac.log`. Paste only the lines around the failure.
+        **Redact hostnames, IP addresses, and usernames before posting.** The log never contains passwords, but it does contain hosts and users.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: This is not a security vulnerability (those go through SECURITY.md, not a public issue).
+          required: true

@@ -164,10 +164,17 @@ struct ProfileEditView: View {
                             if !credentialStore.persists {
                                 HStack {
                                     Spacer().frame(width: 80)
-                                    Text("Not saved — credential storage is set to None. Change it in Settings → Security.")
-                                        .font(.caption2)
-                                        .foregroundStyle(.orange)
-                                        .fixedSize(horizontal: false, vertical: true)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Not saved — credential storage is set to None. Change it in Settings → Security.")
+                                            .font(.caption2)
+                                            .foregroundStyle(.orange)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                        SettingsLink {
+                                            Label("Open Security Settings…", systemImage: "lock.shield")
+                                        }
+                                        .controlSize(.small)
+                                    }
+                                    Spacer()
                                 }
                             }
 

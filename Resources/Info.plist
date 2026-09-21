@@ -9,7 +9,7 @@
 	<key>CFBundleExecutable</key>
 	<string>RemminaMac</string>
 	<key>CFBundleGetInfoString</key>
-	<string>RemminaMac 0.9.0 Beta — pre-release, not for production use</string>
+	<string>RemminaMac 0.9.1 Beta — pre-release, not for production use</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon.icns</string>
 	<key>CFBundleIdentifier</key>
@@ -21,7 +21,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.9.0</string>
+	<string>0.9.1</string>
 	<key>CFBundleVersion</key>
 	<string>31</string>
 	<key>LSApplicationCategoryType</key>
