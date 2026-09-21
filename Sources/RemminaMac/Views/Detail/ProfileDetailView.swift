@@ -12,6 +12,10 @@ struct ProfileDetailView: View {
     enum PasswordStatus {
         case notSet
         case stored
+        /// The active backend is the encrypted file and it has not been
+        /// unlocked this run — a secret may well be stored; we just can't
+        /// look yet. Distinct from `accessDenied` so the row can say so.
+        case storeLocked
         case accessDenied
     }
 
@@ -152,6 +156,10 @@ struct ProfileDetailView: View {
                         Label("Stored in \(credentialStore.displayName)", systemImage: "lock.shield.fill")
                             .font(.caption)
                             .foregroundStyle(.green)
+                    case .storeLocked:
+                        Label("Encrypted store locked — unlock it in Settings → Security", systemImage: "lock.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
                     case .accessDenied:
                         Label("Keychain access denied", systemImage: "exclamationmark.shield.fill")
                             .font(.caption)
@@ -241,6 +249,8 @@ struct ProfileDetailView: View {
             // not pull the password itself into memory or risk a Keychain
             // ACL prompt just from selecting a row.
             passwordStatus = try credentialStore.hasSecret(.password, for: profile.id) ? .stored : .notSet
+        } catch EncryptedStoreError.locked {
+            passwordStatus = .storeLocked
         } catch {
             passwordStatus = .accessDenied
         }

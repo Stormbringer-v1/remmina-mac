@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest an improvement or a new capability
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation you are in, not just the feature you want.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - SSH
+        - VNC
+        - RDP
+        - Profiles / import / export
+        - Credential storage
+        - Settings / UI
+        - Build / distribution
+        - Other
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including workarounds that exist today (ssh-agent, ssh config, other apps).

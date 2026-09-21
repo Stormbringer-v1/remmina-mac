@@ -4,10 +4,10 @@
   <p><b>A Native, Secure SSH, VNC, and RDP Connection Client for macOS</b></p>
 
   <p>
-    <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-5.9-F05138.svg?style=flat&logo=swift" alt="Swift 5.9" /></a>
+    <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-6.1+-F05138.svg?style=flat&logo=swift" alt="Swift 6.1+" /></a>
     <a href="https://apple.com/macos"><img src="https://img.shields.io/badge/macOS-14.0+-000000.svg?style=flat&logo=apple" alt="macOS 14+" /></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat" alt="License MIT" /></a>
-    <a href="#"><img src="https://img.shields.io/badge/Version-0.9.0--beta-orange.svg?style=flat" alt="Version 0.9.0 beta" /></a>
+    <a href="https://github.com/Stormbringer-v1/remmina-mac/releases"><img src="https://img.shields.io/badge/Version-0.9.1--beta-orange.svg?style=flat" alt="Version 0.9.1 beta" /></a>
     <a href="https://github.com/Stormbringer-v1/remmina-mac/actions/workflows/build-test.yml"><img src="https://github.com/Stormbringer-v1/remmina-mac/actions/workflows/build-test.yml/badge.svg" alt="Build & Test" /></a>
   </p>
 </div>
@@ -17,12 +17,41 @@
 RemminaMac is a powerful, native macOS remote connection manager inspired by the popular Linux tool [Remmina](https://remmina.org/). Built fully in **SwiftUI** and **SwiftData**, it provides a stunning, secure, and blazing-fast interface for managing remote connections, with opt-in credential storage rather than a hidden default backend.
 
 > [!WARNING]
-> **This is a 0.9.0 beta and is not production ready.** SSH, VNC, and RDP
-> connections have not yet been verified end to end against live servers, and
-> the automated suite is currently intermittent. Use it against hosts you can
-> afford to have a bad session with, and expect rough edges.
+> **This is a 0.9.1 beta and is not production ready.** SSH has been used
+> against real hosts by the maintainer; VNC and RDP have **not** yet been
+> verified against live servers, so expect rough edges there. The automated
+> test suite is deterministic, including the VNC suite running clean under
+> Thread Sanitizer. The app bundle is ad-hoc signed, not notarized — see
+> "Installing as a real macOS app" below.
 
 > **Note:** RemminaMac is an independent project and is **not** affiliated with, sponsored by, or endorsed by the Remmina project. The name reflects shared inspiration only.
+
+---
+
+## 📸 Screenshots
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/screenshots/empty-state.png" alt="RemminaMac empty state on first launch, prompting to create a profile" width="100%" />
+      <br />First launch: no profiles yet.
+    </td>
+    <td width="50%">
+      <img src="docs/screenshots/main-window.png" alt="RemminaMac main window with the profile sidebar and a profile's detail view" width="100%" />
+      <br />Sidebar and profile detail.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="docs/screenshots/ssh-session.png" alt="A connected SSH terminal session in a RemminaMac tab" width="100%" />
+      <br />A connected SSH session.
+    </td>
+    <td width="50%">
+      <img src="docs/screenshots/settings-security.png" alt="Settings pane showing the Security tab with credential storage options" width="100%" />
+      <br />Settings → Security: opt-in credential storage.
+    </td>
+  </tr>
+</table>
 
 ---
 
@@ -47,6 +76,20 @@ RemminaMac is a powerful, native macOS remote connection manager inspired by the
 - **Enhanced VNC & RDP Capabilities** (e.g., support for more encodings, embedded RDP engine, etc.)
 - **SFTP Drag-and-Drop File Browser**
 - **Cloud Sync**
+
+---
+
+## 🆕 What's new in 0.9.1
+
+- Idle VNC sessions no longer drop after 30 seconds (liveness probe + TCP keepalive).
+- Deleting a profile closes its live sessions before removing stored credentials.
+- Re-importing an export no longer duplicates profiles (exports carry ids).
+- A passphrase-protected SSH key now gets an actionable `ssh-add --apple-use-keychain` instruction instead of a bare "Permission denied".
+- SSH failures are mapped to specific errors (host key changed, DNS, refused, timeout, unreachable) instead of one generic message.
+- Selecting a profile no longer triggers a Keychain access-control prompt just to check whether a password exists.
+- Unlocking the encrypted credential store no longer freezes the UI.
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full list.
 
 ---
 
@@ -98,7 +141,7 @@ cp -r dist/RemminaMac.app /Applications/
 `build_app.sh` compiles a release binary, assembles the bundle, generates the
 icon set from `Resources/AppIcon.png`, applies the entitlements, stamps the
 build number from the commit count, and ad-hoc code signs the result. It
-prints the version it produced, for example `Version: 0.9.0 (build 38)`.
+prints the version it produced, for example `Version: 0.9.1 (build 50)`.
 
 > [!IMPORTANT]
 > **First launch will be blocked by Gatekeeper.** The bundle is ad-hoc signed,
@@ -190,13 +233,7 @@ Keychain access is independent of the sandbox — the `keychain-access-groups` e
 
 ## 🤝 Contributing
 
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for build/test prerequisites, the branch and PR flow, and project conventions. If you're reporting a security issue rather than a bug, please read [SECURITY.md](./SECURITY.md) instead of opening a public issue.
 
 ## 📄 License
 

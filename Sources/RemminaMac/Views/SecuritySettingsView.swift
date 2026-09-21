@@ -8,6 +8,12 @@ import SwiftUI
 struct SecuritySettingsView: View {
     @Bindable private var settings = SecuritySettings.shared
     @State private var showingEncryptedStoreSheet = false
+    /// Mirrors `EncryptedFileCredentialStore.shared.isUnlocked` as view
+    /// state. The store itself is not observable, so reading `isUnlocked`
+    /// straight from `body` left the row saying "Locked" after a successful
+    /// Create/Unlock, and never updated after Lock. Refreshed on appear,
+    /// after the passphrase sheet closes, and after Lock.
+    @State private var isStoreUnlocked = EncryptedFileCredentialStore.shared.isUnlocked
 
     var body: some View {
         Form {
@@ -79,13 +85,14 @@ struct SecuritySettingsView: View {
 
                 if settings.credentialBackend == .encryptedFile {
                     HStack {
-                        Image(systemName: EncryptedFileCredentialStore.shared.isUnlocked ? "lock.open" : "lock")
-                            .foregroundStyle(EncryptedFileCredentialStore.shared.isUnlocked ? .green : .secondary)
-                        Text(EncryptedFileCredentialStore.shared.isUnlocked ? "Unlocked for this session" : "Locked")
+                        Image(systemName: isStoreUnlocked ? "lock.open" : "lock")
+                            .foregroundStyle(isStoreUnlocked ? .green : .secondary)
+                        Text(isStoreUnlocked ? "Unlocked for this session" : "Locked")
                         Spacer()
                         Button(unlockButtonTitle) {
-                            if EncryptedFileCredentialStore.shared.isUnlocked {
+                            if isStoreUnlocked {
                                 EncryptedFileCredentialStore.shared.lock()
+                                isStoreUnlocked = EncryptedFileCredentialStore.shared.isUnlocked
                             } else {
                                 showingEncryptedStoreSheet = true
                             }
@@ -98,15 +105,17 @@ struct SecuritySettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 480, height: 460)
+        .onAppear { isStoreUnlocked = EncryptedFileCredentialStore.shared.isUnlocked }
         .sheet(isPresented: $showingEncryptedStoreSheet) {
             EncryptedStorePassphraseView(store: EncryptedFileCredentialStore.shared) { _ in
                 showingEncryptedStoreSheet = false
+                isStoreUnlocked = EncryptedFileCredentialStore.shared.isUnlocked
             }
         }
     }
 
     private var unlockButtonTitle: String {
-        if EncryptedFileCredentialStore.shared.isUnlocked { return "Lock" }
+        if isStoreUnlocked { return "Lock" }
         return EncryptedFileCredentialStore.shared.fileExists ? "Unlock" : "Create"
     }
 }

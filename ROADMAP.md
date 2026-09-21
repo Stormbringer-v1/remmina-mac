@@ -5,10 +5,13 @@ intentionally short — see `README.md` for capabilities and architecture.
 
 ## Status
 
-Active development. The core SSH experience is stable and verified by an
+Active development, currently at 0.9.1 beta. The core SSH experience has been
+used against real hosts by the maintainer and is backed by a deterministic
 automated test suite covering security, validator fuzzing, credential-storage
-behaviour, session lifecycle limits, and reactivity. VNC and RDP are functional
-but partial; expect rough edges on real servers until matured.
+behaviour, session lifecycle limits, and reactivity — the VNC suite also runs
+clean under Thread Sanitizer. VNC and RDP are functional but partial and have
+not yet been verified against live servers; expect rough edges there until
+matured.
 
 ## What's working
 
@@ -52,7 +55,7 @@ but partial; expect rough edges on real servers until matured.
   mouse/keyboard, clipboard). Authentication is the classic DES challenge
   over a plain, unencrypted TCP socket — tunnel over SSH on untrusted
   networks. Tight/CoRRE/ZRRE encodings and reverse connections are not
-  implemented.
+  implemented, and VNC has not been verified against live servers.
 - RDP prefers a locally installed native SDL FreeRDP client (`sdl-freerdp` /
   `sdl-freerdp3`) over the X11 `xfreerdp`, falling back to the Microsoft
   Remote Desktop app if neither is present. There is no embedded RDP engine,
